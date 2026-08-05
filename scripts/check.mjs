@@ -6,7 +6,12 @@ const LOCS = [
   [52.5, 13.42],
   [52.52, 13.405],
   [52.49, 13.39],
+  [52.515, 13.4], // used to snap to a 13-node island; see main_component.sql
 ];
+
+// A walk isochrone that reaches almost nothing means the origin snapped to a
+// disconnected fragment of the graph.
+const MIN_WALK_KM = 10;
 const PROFILES = ["walk", "stroller", "wheelchair"];
 
 // total length of a MultiLineString in rough km — the real measure of reach
@@ -64,10 +69,13 @@ for (const [lat, lon] of LOCS) {
   const atMost = (a, b) => a <= b * 1.01 + 0.01;
   const ordered =
     atMost(km.stroller, km.walk) && atMost(km.wheelchair, km.stroller);
-  if (!ordered) failed++;
+  // the walk graph is fully connected, so no origin should route nowhere
+  const onMainComponent = km.walk >= MIN_WALK_KM;
+  if (!ordered || !onMainComponent) failed++;
   console.log(
-    `${ordered ? "✅" : "❌"} profiles ${lat},${lon} → ` +
+    `${ordered && onMainComponent ? "✅" : "❌"} profiles ${lat},${lon} → ` +
       PROFILES.map((p) => `${p} ${km[p].toFixed(1)}km`).join("  ") +
+      (onMainComponent ? "" : `   ❌ walk under ${MIN_WALK_KM}km — island?`) +
       (km.walk > 5 && km.stroller < 1 ? "   ⚠️ stranded off-foot" : "")
   );
 }

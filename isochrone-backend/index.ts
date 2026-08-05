@@ -187,8 +187,11 @@ app.get("/api/isochrone", async (req: any, res: any) => {
     console.log(`📦 Vertex cache hit for ${vertexKey}`);
   } else {
     cacheMisses++;
+    // main_component only: the geometrically nearest vertex is often on a
+    // disconnected fragment (5.7% of Berlin's vertices), which routes nowhere.
+    // Populated by scripts/main_component.sql.
     const vertexRes = await pool.query(
-      "SELECT id FROM ways_vertices_pgr ORDER BY geom <-> ST_SetSRID(ST_MakePoint($1, $2), 4326) LIMIT 1",
+      "SELECT id FROM ways_vertices_pgr WHERE main_component ORDER BY geom <-> ST_SetSRID(ST_MakePoint($1, $2), 4326) LIMIT 1",
       [lonNum, latNum]
     );
     vertexId = vertexRes.rows[0]?.id;

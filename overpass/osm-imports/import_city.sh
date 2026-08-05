@@ -116,6 +116,10 @@ psql -d "$DB_NAME" -c \
      cost         = ROUND((length_m / CASE WHEN tag_id = 104 THEN 0.7 ELSE 1.4 END)::numeric, 2),
      reverse_cost = ROUND((length_m / CASE WHEN tag_id = 104 THEN 0.7 ELSE 1.4 END)::numeric, 2);"
 
+echo "🧭 Flagging the largest connected component (skips graph islands) ..."
+# Must run after cost normalization — connectivity is computed from cost.
+psql -d "$DB_NAME" -v schema="$CITY_SCHEMA" -f "$(dirname "$0")/../../scripts/main_component.sql"
+
 echo "📊 Running data integrity checks..."
 
 REPORT_FILE="$CITY_DIR/${CITY}_report.txt"
