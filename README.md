@@ -1,5 +1,10 @@
 # isochrone
 
+[![demo](https://img.shields.io/website?url=https%3A%2F%2Fiso.huseyincapan.dev%2Fhealthz&up_message=live&down_message=down&label=demo)](https://iso.huseyincapan.dev)
+[![uptime](https://github.com/capan/isochrone/actions/workflows/uptime.yml/badge.svg)](https://github.com/capan/isochrone/actions/workflows/uptime.yml)
+
+**Live: [iso.huseyincapan.dev](https://iso.huseyincapan.dev)**
+
 Click anywhere on the map and see the street network you can actually reach on
 foot within 15 minutes — coloured by arrival time, with mobility profiles that
 account for stairs and unpaved paths.
