@@ -1,5 +1,7 @@
 // smoke check: banded network comes back complete, and mobility profiles shrink.
-// Run with the backend up: node scripts/check.mjs
+// Run with the backend up:  node scripts/check.mjs
+// Against a deployment:     API=https://iso.example.com node scripts/check.mjs
+const API = process.env.API ?? "http://localhost:3001";
 const LOCS = [
   [52.5, 13.42],
   [52.52, 13.405],
@@ -26,7 +28,7 @@ const lengthKm = (geom) => {
 
 const get = async (lat, lon, profile) => {
   const res = await fetch(
-    `http://localhost:3001/api/isochrone?lat=${lat}&lon=${lon}&minutes=15&profile=${profile}`
+    `${API}/api/isochrone?lat=${lat}&lon=${lon}&minutes=15&profile=${profile}`
   );
   return res.json();
 };

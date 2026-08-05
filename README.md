@@ -43,15 +43,44 @@ Then:
 
 ## Deploy
 
-    cp .env.example .env      # change PGPASSWORD
+    cp .env.example .env      # change PGPASSWORD, set SITE_ADDRESS
     docker compose up -d --build
 
-The app container serves both the API and the built UI on :3001, so there's no
-separate web server. The database starts empty — run `import_city.sh` against
-the exposed port (5454) once, and it persists in the `pgdata` volume.
+Caddy terminates TLS on 80/443 (automatic Let's Encrypt once `SITE_ADDRESS` is
+a real hostname), compresses responses, and proxies to the app — which serves
+the API and the built UI together, so there's no separate web server. The app
+port is not published; it is reachable only through Caddy. Postgres and Redis
+bind to `127.0.0.1` so the import script works from the host without exposing
+them publicly.
 
 `CITY` selects which schema to query and must match the imported one
 (`import_city.sh greater-london` creates schema `greater_london`).
+
+### Getting a city into the deployment
+
+The database starts empty. Rather than running `osm2pgrouting` on the server —
+which needs `osmium`, a 1.6GB intermediate file, and a long import — dump the
+schema from a machine that already has it and restore:
+
+    pg_dump -h 127.0.0.1 -p 5454 -U postgres -d osm_db \
+      --schema=berlin -Fc -Z6 -f berlin.dump          # ~105MB, ~10s
+
+    # on the target, extensions first — a --schema dump doesn't carry them
+    psql -h 127.0.0.1 -p 5454 -U postgres -d osm_db -c \
+      "CREATE EXTENSION IF NOT EXISTS postgis;
+       CREATE EXTENSION IF NOT EXISTS pgrouting;
+       CREATE EXTENSION IF NOT EXISTS hstore;"
+
+    pg_restore -h 127.0.0.1 -p 5454 -U postgres -d osm_db \
+      --no-owner -j4 berlin.dump                       # ~5s
+
+Berlin restores to ~587MB (the source schema is larger only because of dead
+tuples from the cost UPDATEs). The `db` image is pinned to the major version the
+dump came from — a dump will not restore into an older Postgres.
+
+### Verifying a deployment
+
+    API=https://iso.example.com node scripts/check.mjs
 
 ## Checks
 
