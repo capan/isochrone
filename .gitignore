@@ -1,0 +1,19 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+
+# OSM extracts and derived data — 1.6GB of berlin.osm alone.
+# Regenerate with overpass/osm-imports/import_city.sh
+*.osm
+*.osm.pbf
+*.zip
+osm_db/*/
+
+# run artifacts
+performance.txt
+*.log
+
+.DS_Store
+__MACOSX/

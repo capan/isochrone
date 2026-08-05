@@ -1,0 +1,22 @@
+📄 Data Integrity Report for berlin
+-----------------------------------------
+Ways count:
+ count  
+--------
+ 692770
+(1 row)
+
+
+Vertices count:
+ count  
+--------
+ 570734
+(1 row)
+
+
+Ways with NULL geometry:
+ count 
+-------
+     0
+(1 row)
+

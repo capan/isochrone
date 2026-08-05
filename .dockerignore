@@ -1,0 +1,10 @@
+**/node_modules
+**/dist
+.git
+# 1.6GB of OSM extracts must never enter the build context
+overpass/
+scripts/
+*.osm
+*.osm.pbf
+*.zip
+.env

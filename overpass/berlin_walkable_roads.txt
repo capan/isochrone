@@ -1,0 +1,7 @@
+highway=footway
+highway=pedestrian
+highway=path
+highway=residential
+highway=living_street
+highway=track
+highway=service

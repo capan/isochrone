@@ -1,0 +1,43 @@
+services:
+  db:
+    image: pgrouting/pgrouting:16-3.4-3.6
+    environment:
+      POSTGRES_PASSWORD: ${PGPASSWORD:-password}
+      POSTGRES_DB: osm_db
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # exposed so import_city.sh can run from the host
+    ports:
+      - "5454:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redisdata:/data
+    ports:
+      - "6363:6379"
+
+  app:
+    build: .
+    environment:
+      PGHOST: db
+      PGPORT: 5432
+      PGPASSWORD: ${PGPASSWORD:-password}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      CITY: ${CITY:-berlin}
+    ports:
+      - "3001:3001"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+volumes:
+  pgdata:
+  redisdata:

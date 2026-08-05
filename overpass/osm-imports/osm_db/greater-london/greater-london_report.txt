@@ -1,0 +1,22 @@
+📄 Data Integrity Report for greater_london
+-----------------------------------------
+Ways count:
+ count  
+--------
+ 665010
+(1 row)
+
+
+Vertices count:
+ count  
+--------
+ 588678
+(1 row)
+
+
+Ways with NULL geometry:
+ count 
+-------
+     0
+(1 row)
+
