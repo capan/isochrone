@@ -19,11 +19,19 @@ const RAMP = [
   "#0d366b",
 ];
 
+// Deep-link support: /?lat=52.52&lon=13.405&profile=wheelchair loads with
+// that isochrone drawn — the MCP server's "view on map" links point here.
+const urlParams = new URLSearchParams(window.location.search);
+const urlProfile = urlParams.get("profile") ?? "";
+const initialProfile = PROFILES.includes(urlProfile) ? urlProfile : PROFILES[0];
+const urlLat = parseFloat(urlParams.get("lat") ?? "");
+const urlLon = parseFloat(urlParams.get("lon") ?? "");
+
 export default function MapView() {
   const mapRef = useRef<L.Map | null>(null);
   const isochroneRef = useRef<L.LayerGroup | null>(null);
   // refs, not state: the map effect runs once and would capture a stale value
-  const profileRef = useRef(PROFILES[0]);
+  const profileRef = useRef(initialProfile);
   const lastClickRef = useRef<[number, number] | null>(null);
   const redrawRef = useRef<() => void>(() => {});
 
@@ -104,12 +112,18 @@ export default function MapView() {
     map.on("click", (e: L.LeafletMouseEvent) => {
       debouncedUpdate(e.latlng.lat, e.latlng.lng);
     });
+
+    if (!isNaN(urlLat) && !isNaN(urlLon)) {
+      map.setView([urlLat, urlLon], 14);
+      lastClickRef.current = [urlLat, urlLon];
+      updateIsochrones(urlLat, urlLon);
+    }
   }, []);
 
   return (
     <>
       <select
-        defaultValue={PROFILES[0]}
+        defaultValue={initialProfile}
         onChange={(e) => {
           profileRef.current = e.target.value;
           redrawRef.current();

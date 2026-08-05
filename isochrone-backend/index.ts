@@ -82,6 +82,23 @@ type ProfileName = keyof typeof PROFILES;
 // Time slices the client paints with a 10-step sequential ramp.
 const BANDS = 10;
 
+// A click farther than this from any routable street is outside the imported
+// area. In-city snaps measure 7–67m; Paris would otherwise snap to Berlin's
+// westernmost vertex and return a silent empty result.
+const MAX_SNAP_M = 500;
+
+// Coverage extent, computed once for the 400 message.
+let coverageBbox: string | null = null;
+const getCoverage = async () => {
+  if (!coverageBbox) {
+    const r = await pool.query(
+      "SELECT ST_Extent(geom)::text AS b FROM ways_vertices_pgr WHERE main_component"
+    );
+    coverageBbox = r.rows[0]?.b ?? "unknown";
+  }
+  return coverageBbox;
+};
+
 // Builds the cost expression pgr_drivingDistance routes on. Numbers only —
 // no user input reaches this string (profile names are whitelisted below).
 const costExpr = (name: ProfileName) => {
@@ -191,12 +208,25 @@ app.get("/api/isochrone", async (req: any, res: any) => {
     // disconnected fragment (5.7% of Berlin's vertices), which routes nowhere.
     // Populated by scripts/main_component.sql.
     const vertexRes = await pool.query(
-      "SELECT id FROM ways_vertices_pgr WHERE main_component ORDER BY geom <-> ST_SetSRID(ST_MakePoint($1, $2), 4326) LIMIT 1",
+      `SELECT id, ST_Distance(geom::geography, ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography) AS dist_m
+       FROM ways_vertices_pgr WHERE main_component
+       ORDER BY geom <-> ST_SetSRID(ST_MakePoint($1, $2), 4326) LIMIT 1`,
       [lonNum, latNum]
     );
-    vertexId = vertexRes.rows[0]?.id;
-    if (!vertexId) throw new Error("No nearest vertex found");
+    const row = vertexRes.rows[0];
+    if (!row) throw new Error("No nearest vertex found");
 
+    if (row.dist_m > MAX_SNAP_M) {
+      return res.status(400).json({
+        error: "outside coverage",
+        detail: `Nearest routable street is ${Math.round(
+          row.dist_m / 1000
+        )}km away. This deployment covers Berlin, Germany (bbox ${await getCoverage()}).`,
+      });
+    }
+    vertexId = row.id;
+
+    // only successful snaps are cached, so the guard can't be bypassed
     await cacheSet(vertexKey, vertexId.toString(), 60 * 60 * 24);
   }
 
