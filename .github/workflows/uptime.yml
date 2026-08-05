@@ -1,0 +1,41 @@
+name: uptime
+
+# Runs on GitHub's infrastructure, not the server — a monitor that lives on the
+# box it watches goes down with it. A failed run emails the repo owner.
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: # lets you trigger a check by hand from the Actions tab
+
+env:
+  API: https://iso.huseyincapan.dev
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: health
+        run: |
+          body=$(curl -fsS --max-time 30 "$API/healthz")
+          echo "$body"
+          echo "$body" | grep -q '"healthy":true' \
+            || { echo "::error::healthz reports unhealthy"; exit 1; }
+
+      - name: certificate has more than 10 days left
+        run: |
+          host=${API#https://}
+          end=$(echo | openssl s_client -servername "$host" -connect "$host":443 2>/dev/null \
+                | openssl x509 -noout -enddate | cut -d= -f2)
+          left=$(( ( $(date -d "$end" +%s) - $(date +%s) ) / 86400 ))
+          echo "certificate expires in ${left} days ($end)"
+          [ "$left" -gt 10 ] || { echo "::error::cert expires in ${left}d — renewal is stuck"; exit 1; }
+
+      - name: isochrone returns a complete banded network
+        run: |
+          resp=$(curl -fsS --max-time 60 "$API/api/isochrone?lat=52.52&lon=13.405&minutes=15")
+          got=$(echo "$resp" | jq '.geojson.features | length')
+          want=$(echo "$resp" | jq '.bands')
+          echo "bands ${got}/${want}, profile $(echo "$resp" | jq -r '.profile')"
+          [ "$got" = "$want" ] \
+            || { echo "::error::expected ${want} bands, got ${got}"; exit 1; }
