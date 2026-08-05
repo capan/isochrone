@@ -3,11 +3,21 @@ import express from "express";
 import { Pool } from "pg";
 import cors from "cors";
 import { createClient } from "redis";
+import rateLimit from "express-rate-limit";
 import fs from "fs";
 import path from "path";
 
 const app = express();
 const port = parseInt(process.env.PORT ?? "3001", 10);
+
+// A 60-minute walk costs ~25s of CPU and returns ~4.5MB — anyone could send
+// that in a loop, so this is a DoS control, not just a UX limit.
+const MAX_MINUTES = parseInt(process.env.MAX_MINUTES ?? "25", 10);
+
+// Caddy is the only thing in front, so trust exactly one hop. Without this
+// every request looks like it came from the proxy and the whole internet
+// shares one bucket; trusting blindly instead lets clients spoof the header.
+app.set("trust proxy", 1);
 
 let cacheHits = 0;
 let cacheMisses = 0;
@@ -18,8 +28,30 @@ const redis = createClient({
     port: parseInt(process.env.REDIS_PORT ?? "6363", 10),
   },
   database: 1,
+  // fail commands immediately while disconnected instead of queueing them,
+  // so a redis outage can't make /healthz hang
+  disableOfflineQueue: true,
 });
+// Without this, a dropped socket is an unhandled 'error' event and node exits.
+redis.on("error", (err) => console.error("⚠️ redis:", (err as Error).message));
 redis.connect().catch(console.error);
+
+// The cache is an optimization, not a dependency: if redis is down the API
+// should get slower, not fall over.
+const cacheGet = async (key: string) => {
+  try {
+    return await redis.get(key);
+  } catch {
+    return null;
+  }
+};
+const cacheSet = async (key: string, value: string, ttlSeconds: number) => {
+  try {
+    await redis.set(key, value, { EX: ttlSeconds });
+  } catch {
+    /* cache write failures are not request failures */
+  }
+};
 
 app.use(cors());
 
@@ -32,6 +64,8 @@ const pool = new Pool({
   port: parseInt(process.env.PGPORT ?? "5454", 10),
   // import_city.sh imports each city into its own schema
   options: `-c search_path=${process.env.CITY ?? "berlin"},public`,
+  // backstop for anything that gets past MAX_MINUTES
+  statement_timeout: 15000,
 });
 
 // Walking speed in m/s, plus per-way-type multipliers (0 = impassable).
@@ -60,6 +94,36 @@ const costExpr = (name: ProfileName) => {
     ? `CASE ${cases.join(" ")} ELSE length_m / ${speed} END`
     : `length_m / ${speed}`;
 };
+
+// Checked before the rate limiter so monitoring never consumes quota.
+app.get("/healthz", async (_, res) => {
+  const checks: Record<string, string> = {};
+  try {
+    await pool.query("SELECT 1");
+    checks.postgres = "ok";
+  } catch (err) {
+    checks.postgres = (err as Error).message;
+  }
+  try {
+    await redis.ping();
+    checks.redis = "ok";
+  } catch (err) {
+    checks.redis = (err as Error).message;
+  }
+  const healthy = Object.values(checks).every((v) => v === "ok");
+  res.status(healthy ? 200 : 503).json({ healthy, checks });
+});
+
+// Generous for a human clicking a map, fast to hit with a script.
+app.use(
+  rateLimit({
+    windowMs: 60_000,
+    limit: parseInt(process.env.RATE_LIMIT ?? "60", 10),
+    standardHeaders: "draft-7",
+    legacyHeaders: false,
+    message: { error: "Too many requests, slow down." },
+  })
+);
 
 app.get("/api/profiles", (_, res) => {
   res.json(Object.keys(PROFILES));
@@ -98,7 +162,7 @@ app.get("/api/isochrone", async (req: any, res: any) => {
     return res.status(400).json({ error: "Invalid lat or lon" });
   }
 
-  const durations = (minutes as string)
+  const durations = String(minutes ?? "")
     .split(",")
     .map((m) => parseInt(m.trim()))
     .filter((m) => !isNaN(m) && m > 0);
@@ -107,8 +171,14 @@ app.get("/api/isochrone", async (req: any, res: any) => {
     return res.status(400).json({ error: "Invalid minutes list" });
   }
 
+  if (Math.max(...durations) > MAX_MINUTES) {
+    return res
+      .status(400)
+      .json({ error: `minutes must be ${MAX_MINUTES} or less` });
+  }
+
   const vertexKey = `vertex:${latNum.toFixed(5)},${lonNum.toFixed(5)}`;
-  let vertexIdStr = await redis.get(vertexKey);
+  let vertexIdStr = await cacheGet(vertexKey);
   let vertexId: number;
 
   if (vertexIdStr) {
@@ -124,9 +194,7 @@ app.get("/api/isochrone", async (req: any, res: any) => {
     vertexId = vertexRes.rows[0]?.id;
     if (!vertexId) throw new Error("No nearest vertex found");
 
-    await redis.set(vertexKey, vertexId.toString(), {
-      EX: 60 * 60 * 24, // ⏳ 24-hour expiry
-    });
+    await cacheSet(vertexKey, vertexId.toString(), 60 * 60 * 24);
   }
 
   // The reachable set IS the street network — one query at the longest
@@ -151,7 +219,7 @@ app.get("/api/isochrone", async (req: any, res: any) => {
   )}:${duration}:${profile}`;
 
   try {
-    const cached = await redis.get(redisKey);
+    const cached = await cacheGet(redisKey);
     if (cached) {
       console.log(`📦 Network cache hit for ${redisKey}`);
       cacheHits++;
@@ -186,7 +254,8 @@ app.get("/api/isochrone", async (req: any, res: any) => {
          jsonb_agg(
            jsonb_build_object(
              'type', 'Feature',
-             'geometry', ST_AsGeoJSON(ST_SimplifyPreserveTopology(geom, 0.00003))::jsonb,
+             -- 6 decimals is ~10cm; far beyond what any zoom level renders
+             'geometry', ST_AsGeoJSON(ST_SimplifyPreserveTopology(geom, 0.00003), 6)::jsonb,
              'properties', jsonb_build_object('band', band)
            ) ORDER BY band
          ),
@@ -206,9 +275,7 @@ app.get("/api/isochrone", async (req: any, res: any) => {
       },
     };
 
-    await redis.set(redisKey, JSON.stringify(responseObj), {
-      EX: 60 * 60 * 24,
-    });
+    await cacheSet(redisKey, JSON.stringify(responseObj), 60 * 60 * 24);
 
     console.log(
       `✅ Network (${responseObj.geojson.features.length} bands) in ${

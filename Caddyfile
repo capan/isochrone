@@ -1,0 +1,6 @@
+# Set SITE_ADDRESS to your hostname (e.g. iso.example.com) and Caddy fetches
+# a Let's Encrypt certificate automatically. Defaults to :80 for local testing.
+{$SITE_ADDRESS::80} {
+	encode zstd gzip
+	reverse_proxy app:3001
+}
