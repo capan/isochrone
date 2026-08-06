@@ -17,3 +17,6 @@ performance.txt
 
 .DS_Store
 __MACOSX/
+
+# claude artifacts
+HANDOFF.md

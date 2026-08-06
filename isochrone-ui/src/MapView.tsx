@@ -169,6 +169,27 @@ export default function MapView() {
         </div>
       </div>
 
+      <div
+        style={{
+          position: "absolute",
+          bottom: 24,
+          left: 10,
+          zIndex: 1000,
+          background: "rgba(255,255,255,0.92)",
+          padding: "8px 10px",
+          borderRadius: 4,
+          font: "12px system-ui",
+          color: "#52514e",
+        }}
+      >
+        <div style={{ marginBottom: 4, color: "#0b0b0b" }}>
+          ask Claude about reachability — MCP server:
+        </div>
+        <code style={{ userSelect: "all", font: "11px ui-monospace, monospace" }}>
+          claude mcp add isochrone -- npx -y isochrone-mcp
+        </code>
+      </div>
+
       <div id="map" style={{ height: "100vh" }} />
     </>
   );

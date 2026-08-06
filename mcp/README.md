@@ -1,0 +1,50 @@
+# isochrone-mcp
+
+MCP server for pedestrian isochrones: from a point, the actual street network
+reachable within a time budget — not a convex hull — for **walk**, **stroller**,
+and **wheelchair** profiles (stairs and rough surfaces slow or block the
+latter two). Backed by [iso.huseyincapan.dev](https://iso.huseyincapan.dev)
+(OSM → pgRouting). **Currently covers Berlin, Germany.**
+
+This is a portfolio project. The API it calls is a single small VPS with a
+60 req/min rate limit — fine for interactive agent use, not for batch jobs.
+
+## Install
+
+```bash
+claude mcp add isochrone -- npx -y isochrone-mcp
+```
+
+Or in any MCP client config:
+
+```json
+{ "mcpServers": { "isochrone": { "command": "npx", "args": ["-y", "isochrone-mcp"] } } }
+```
+
+## Tool: `reachable_area`
+
+| arg | | |
+|---|---|---|
+| `lat`, `lon` | required | origin (WGS84) |
+| `minutes` | default 15, max 25 | time budget |
+| `profile` | `walk` \| `stroller` \| `wheelchair` | mobility profile |
+| `target` | optional `{lat, lon}` | is this destination reachable, and when? |
+| `include_geometry` | default `false` | also return the raw GeoJSON bands |
+
+Returns a prose summary: total street length reached, N–S/E–W extent, arrival
+band for the target if given, and a link to view the isochrone on the map.
+
+```
+15 min (walk) from 52.52, 13.405 reaches 132.3 km of streets, spanning
+3.0 km N–S × 3.5 km E–W in 10 arrival-time bands.
+Target 52.522, 13.41 is reachable: arrival ~7.5–9.0 min (band 6 of 10).
+Map: https://iso.huseyincapan.dev/?lat=52.52&lon=13.405&profile=walk
+```
+
+Point it at your own deployment with `ISOCHRONE_API=https://your-host`.
+
+## Caveats
+
+- Berlin only (for now). Anywhere else returns an "outside coverage" error.
+- Stroller/wheelchair speed factors are reasoned estimates, not calibrated
+  measurements.
