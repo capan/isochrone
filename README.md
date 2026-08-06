@@ -39,7 +39,9 @@ any MCP client answer reachability questions against this API:
 claude mcp add isochrone -- npx -y isochrone-mcp
 ```
 
-![Claude answering a reachability question and opening the isochrone map](mcp/demo.gif)
+<!-- 1320px source shown at 660 — 2x density, so it stays sharp on retina -->
+<img src="mcp/demo.gif" width="660" alt="Claude answering a reachability question, then the isochrone drawn on the map">
+
 
 One tool, `reachable_area`: origin + minutes + profile, optional target
 ("can I get there in time?"). Returns a prose summary and a map link, not

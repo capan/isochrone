@@ -9,7 +9,8 @@ latter two). Backed by [iso.huseyincapan.dev](https://iso.huseyincapan.dev)
 This is a portfolio project. The API it calls is a single small VPS with a
 60 req/min rate limit — fine for interactive agent use, not for batch jobs.
 
-![Claude answering a reachability question and opening the isochrone map](https://raw.githubusercontent.com/capan/isochrone/main/mcp/demo.gif)
+<img src="https://raw.githubusercontent.com/capan/isochrone/main/mcp/demo.gif" width="660" alt="Claude answering a reachability question, then the isochrone drawn on the map">
+
 
 ## Install
 

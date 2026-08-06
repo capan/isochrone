@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- arrival-time bands radiating from the origin pin, same ramp as the map -->
+  <circle cx="16" cy="16" r="15" fill="#0d366b"/>
+  <circle cx="16" cy="16" r="11" fill="#256abf"/>
+  <circle cx="16" cy="16" r="7" fill="#86b6ef"/>
+  <circle cx="16" cy="16" r="3.5" fill="#d33"/>
+</svg>
