@@ -7,6 +7,15 @@ import L from "leaflet";
 const MAX_MINUTES = 15;
 const PROFILES = ["walk", "stroller", "wheelchair", "bike"];
 
+// Emoji rather than an icon dependency; the text label stays next to them, so
+// nothing depends on reading a glyph correctly.
+const PROFILE_ICONS: Record<string, string> = {
+  walk: "🚶",
+  stroller: "🚼",
+  wheelchair: "♿",
+  bike: "🚲",
+};
+
 // Sequential single-hue ramp, light→dark = near→far. Starts at step 250, the
 // lightest that still clears contrast against the basemap.
 const RAMP = [
@@ -91,7 +100,21 @@ export default function MapView() {
 
   // the only two things worth re-rendering for; the map itself stays imperative
   const [offer, setOffer] = useState<{ lat: number; lon: number } | null>(null);
-  const [importing, setImporting] = useState<string | null>(null);
+  // id → status text. A map, not a single value: the server queues imports, so
+  // the UI must let you start a second one while the first is still running.
+  const [jobs, setJobs] = useState<Record<number, string>>({});
+  const setJob = (id: number, text: string | null) =>
+    setJobs((j) => {
+      if (text === null) {
+        const { [id]: _gone, ...rest } = j;
+        return rest;
+      }
+      return { ...j, [id]: text };
+    });
+  // mirrors profileRef so the picker can render which one is active; the map
+  // effect still reads the ref, which never goes stale inside its closure
+  const [profile, setProfile] = useState(initialProfile);
+  const [caps, setCaps] = useState<Record<string, number>>({});
 
   const showToast = (msg: string) => {
     const el = toastRef.current;
@@ -123,6 +146,7 @@ export default function MapView() {
       .then((r) => r.json())
       .then((list: { name: string; maxMinutes: number }[]) => {
         for (const p of list) capsRef.current[p.name] = p.maxMinutes;
+        setCaps({ ...capsRef.current });
         setShownMinutes(
           Math.min(MAX_MINUTES, capsRef.current[profileRef.current] ?? MAX_MINUTES)
         );
@@ -135,8 +159,12 @@ export default function MapView() {
     // shows up on your map while it runs.
     const refreshAreas = async () => {
       try {
-        const res = await fetch("/api/areas");
+        const [res, covRes] = await Promise.all([
+          fetch("/api/areas"),
+          fetch("/api/coverage"),
+        ]);
         const areas: Area[] = await res.json();
+        const coverage = await covRes.json();
         const group = areasRef.current;
         if (!group) return;
         group.clearLayers();
@@ -150,34 +178,82 @@ export default function MapView() {
             saveMine(kept);
           }
         }
-        for (const a of areas) {
-          if (a.status === "failed") continue;
-          const pending = a.status !== "ready";
-          const mine = mineRef.current.has(a.id);
-          L.rectangle(
+        const ready = areas.filter((a) => a.status === "ready");
+        const pending = areas.filter(
+          (a) => a.status === "queued" || a.status === "importing"
+        );
+        const ring = (a: Area): L.LatLngTuple[] => [
+          [a.min_lat, a.min_lon],
+          [a.min_lat, a.max_lon],
+          [a.max_lat, a.max_lon],
+          [a.max_lat, a.min_lon],
+        ];
+
+        // One polygon over the world, with the *merged* coverage punched out.
+        // Per-area holes would overlap, and SVG evenodd re-fills a doubly
+        // punched region — overlapping imports showed as dark patches inside
+        // covered ground. ST_Union server-side removes the overlaps entirely.
+        // Passing inner rings too is correct under evenodd: a pocket enclosed
+        // by coverage flips back to veiled, which is what it is.
+        const rings = (geom: any): L.LatLngTuple[][] => {
+          if (!geom) return [];
+          const polys =
+            geom.type === "MultiPolygon" ? geom.coordinates : [geom.coordinates];
+          return polys.flatMap((poly: number[][][]) =>
+            poly.map((r) => r.map(([lon, lat]) => [lat, lon] as L.LatLngTuple))
+          );
+        };
+
+        L.polygon(
+          [
             [
-              [a.min_lat, a.min_lon],
-              [a.max_lat, a.max_lon],
-            ],
-            {
-              color: mine ? "#2a78d6" : pending ? "#e08c00" : "#3a7d44",
-              weight: pending ? 2 : mine ? 2 : 1,
-              opacity: pending ? 0.95 : mine ? 0.8 : 0.5,
-              fillOpacity: pending ? 0.1 : mine ? 0.06 : 0.03,
-              dashArray: pending ? "6 6" : undefined,
-              className: pending ? "area-importing" : "area-ready",
-              interactive: false,
-            }
-          )
+              [-85, -180],
+              [85, -180],
+              [85, 180],
+              [-85, 180],
+            ] as L.LatLngTuple[],
+            ...rings(coverage),
+          ],
+          {
+            stroke: false,
+            fillColor: "#0b1622",
+            fillOpacity: 0.3,
+            interactive: false,
+          }
+        ).addTo(group);
+
+        // No outline for other people's areas — the veil edge already marks
+        // where coverage ends, and per-box borders crisscrossed into noise.
+        // Only your own imports get a line, so you can find them.
+        for (const a of ready) {
+          if (!mineRef.current.has(a.id)) continue;
+          L.rectangle(ring(a), {
+            color: "#7c4dff",
+            weight: 2,
+            opacity: 0.85,
+            fill: false,
+            interactive: false,
+          }).addTo(group);
+        }
+
+        // In-flight imports keep the marching ants, plus a permanent label so
+        // the "someone else is doing this" signal needs no hover.
+        for (const a of pending) {
+          const mine = mineRef.current.has(a.id);
+          L.rectangle(ring(a), {
+            color: mine ? "#7c4dff" : "#e08c00",
+            weight: 2,
+            opacity: 0.95,
+            fillOpacity: 0.08,
+            dashArray: "6 6",
+            className: "area-importing",
+            interactive: false,
+          })
             .bindTooltip(
-              pending
-                ? `${a.status === "importing" ? "importing now" : "queued"} — ${
-                    mine ? "your request" : "someone else is adding this area"
-                  }`
-                : mine
-                ? "you requested this area"
-                : "covered",
-              { sticky: true }
+              `${a.status === "importing" ? "importing" : "queued"} — ${
+                mine ? "your request" : "someone else"
+              }`,
+              { permanent: true, direction: "center", className: "area-label" }
             )
             .addTo(group);
         }
@@ -306,7 +382,7 @@ export default function MapView() {
     const dLat = IMPORT_HALF_M / 111320;
     const dLon = IMPORT_HALF_M / (111320 * Math.cos((lat * Math.PI) / 180));
     setOffer(null);
-    setImporting("requesting…");
+    let id = -1;
     try {
       const res = await fetch("/api/areas", {
         method: "POST",
@@ -320,17 +396,17 @@ export default function MapView() {
       });
       const job = await res.json();
       if (!res.ok) {
-        setImporting(null);
         return showToast(job.error ?? `Import request failed (${res.status})`);
       }
       claimArea(job.id);
+      id = job.id;
 
       if (job.reused) {
-        setImporting(null);
         refreshAreasRef.current();
         return updateRef.current(lat, lon);
       }
 
+      setJob(id, "queued…");
       refreshAreasRef.current();
       // Poll rather than hold a connection open for the whole import. The 5s
       // overlay poll already redraws the map, so this must not also refresh
@@ -339,22 +415,29 @@ export default function MapView() {
         await new Promise((r) => setTimeout(r, 5000));
         const s = await (await fetch(`/api/areas/${job.id}`)).json();
         if (s.status === "ready") {
-          setImporting(null);
-          showToast("Area imported — drawing your isochrone");
-          return updateRef.current(lat, lon);
+          setJob(id, null);
+          showToast("Area imported");
+          refreshAreasRef.current();
+          // Only jump to it if the map is still where the request was made —
+          // yanking the view out from under someone who has moved on is worse
+          // than making them click once.
+          const at = lastClickRef.current;
+          if (at && at[0] === lat && at[1] === lon) updateRef.current(lat, lon);
+          return;
         }
         if (s.status === "failed") {
-          setImporting(null);
+          setJob(id, null);
           return showToast(`Import failed: ${s.error ?? "unknown error"}`);
         }
-        setImporting(
+        setJob(
+          id,
           s.status === "importing"
             ? "importing streets…"
             : `queued — ${s.ahead} ahead`
         );
       }
     } catch {
-      setImporting(null);
+      if (id > 0) setJob(id, null);
       showToast("Could not reach the import service");
     }
   };
@@ -380,7 +463,7 @@ export default function MapView() {
         }}
       />
 
-      {(offer || importing) && (
+      {offer && (
         <div
           style={{
             position: "absolute",
@@ -399,50 +482,104 @@ export default function MapView() {
             gap: 10,
           }}
         >
-          {importing ? (
-            <>
-              <span className="import-pulse" />
-              <span>{importing}</span>
-            </>
-          ) : (
-            <>
-              <span>Nothing imported here yet.</span>
-              <button
-                onClick={startImport}
-                style={{
-                  font: "13px system-ui",
-                  padding: "5px 10px",
-                  cursor: "pointer",
-                }}
-              >
-                Import 5×5 km area
-              </button>
-            </>
-          )}
+          <span>Nothing imported here yet.</span>
+          <button
+            onClick={startImport}
+            style={{
+              font: "13px system-ui",
+              padding: "5px 10px",
+              cursor: "pointer",
+            }}
+          >
+            Import 5×5 km area
+          </button>
         </div>
       )}
 
-      <select
-        defaultValue={initialProfile}
-        onChange={(e) => {
-          profileRef.current = e.target.value;
-          redrawRef.current();
-        }}
+      {/* Progress lives out of the way, bottom-centre: imports run in a queue
+          on the server, so the map stays fully usable while they do — click
+          elsewhere, switch profile, or queue another area. */}
+      {Object.keys(jobs).length > 0 && (
+        <div
+          style={{
+            position: "absolute",
+            bottom: 14,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 1050,
+            background: "rgba(255,255,255,0.94)",
+            padding: "7px 12px",
+            borderRadius: 20,
+            font: "12px system-ui",
+            color: "#33383d",
+            boxShadow: "0 1px 5px rgba(0,0,0,0.25)",
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+          }}
+        >
+          <span className="import-pulse" />
+          {Object.keys(jobs).length === 1
+            ? Object.values(jobs)[0]
+            : `${Object.keys(jobs).length} imports running`}
+        </div>
+      )}
+
+      {/* Segmented control, not a dropdown: four options is few enough to show
+          at once, and the time budget differs per profile — worth seeing
+          before you pick, not after the legend changes under you. */}
+      <div
+        role="group"
+        aria-label="mobility profile"
         style={{
           position: "absolute",
           top: 10,
           right: 10,
           zIndex: 1000,
-          padding: "6px 10px",
-          font: "14px system-ui",
+          display: "flex",
+          gap: 2,
+          padding: 3,
+          background: "rgba(255,255,255,0.94)",
+          borderRadius: 9,
+          boxShadow: "0 1px 5px rgba(0,0,0,0.28)",
+          font: "13px system-ui",
         }}
       >
-        {PROFILES.map((p) => (
-          <option key={p} value={p}>
-            {p}
-          </option>
-        ))}
-      </select>
+        {PROFILES.map((p) => {
+          const active = p === profile;
+          return (
+            <button
+              key={p}
+              aria-pressed={active}
+              title={caps[p] ? `${p} — up to ${caps[p]} min` : p}
+              onClick={() => {
+                profileRef.current = p;
+                setProfile(p);
+                redrawRef.current();
+              }}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 5,
+                border: "none",
+                borderRadius: 7,
+                cursor: "pointer",
+                padding: "6px 9px",
+                font: "inherit",
+                lineHeight: 1.1,
+                color: active ? "#fff" : "#33383d",
+                background: active ? "#1c5cab" : "transparent",
+              }}
+            >
+              <span style={{ fontSize: 15 }} aria-hidden="true">
+                {PROFILE_ICONS[p]}
+              </span>
+              {/* label hidden on narrow screens by CSS, never on its own */}
+              <span className="profile-label">{p}</span>
+            </button>
+          );
+        })}
+      </div>
 
       <div
         style={{
@@ -458,9 +595,11 @@ export default function MapView() {
         }}
       >
         <div style={{ marginBottom: 4, color: "#0b0b0b" }}>travel time</div>
+        {/* flex:1 rather than a fixed 16px — the legend box is as wide as its
+            widest row, and a fixed ramp left a gap before the "15 min" label */}
         <div style={{ display: "flex" }}>
           {RAMP.map((c) => (
-            <div key={c} style={{ width: 16, height: 10, background: c }} />
+            <div key={c} style={{ flex: 1, height: 10, background: c }} />
           ))}
         </div>
         <div style={{ display: "flex", justifyContent: "space-between" }}>
@@ -472,18 +611,12 @@ export default function MapView() {
             style={{
               width: 13,
               height: 8,
-              border: "1px solid #3a7d44",
-              background: "rgba(58,125,68,0.06)",
+              background: "rgba(11,22,34,0.3)",
             }}
           />
-          covered
+          not imported
           <span
-            style={{
-              width: 13,
-              height: 8,
-              border: "2px solid #2a78d6",
-              background: "rgba(42,120,214,0.08)",
-            }}
+            style={{ width: 13, height: 8, border: "2px solid #7c4dff" }}
           />
           yours
           <span

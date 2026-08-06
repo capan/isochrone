@@ -101,12 +101,17 @@ const PROFILES = {
   },
 } as const;
 
-// MAX_MINUTES bounds CPU, but it was calibrated at walking speed: the cost of
-// a request tracks the *area* the bbox pre-filter hands pgRouting, so 25min
-// of cycling covers 9x the ground and measured 21s on the production box —
-// past the 15s statement_timeout and straight back into the DoS vector the
-// cap exists to close. Bound reach instead, so every profile costs the same.
-const MAX_REACH_M = MAX_MINUTES * 60 * PROFILES.walk.speed;
+// MAX_MINUTES bounds CPU, but it was calibrated at walking speed: cost tracks
+// the *area* the bbox pre-filter hands pgRouting, so 25min of cycling covers
+// 9x the ground and measured 21s on the production box — past the 15s
+// statement_timeout and back into the DoS vector the cap exists to close.
+// Bounding reach instead keeps every profile's cost comparable.
+//
+// Measured cold on the CX23 (bike from Alexanderplatz): 2016m→1.8s,
+// 2520m→3.3s, 3024m→8.0s, 3780m→21.1s. 2520m buys the bike twice the walking
+// radius — enough that the two profiles plainly differ — for 3.3s, where the
+// next step up costs 8s of first-click latency to gain little.
+const MAX_REACH_M = parseInt(process.env.MAX_REACH_M ?? "2520", 10);
 type ProfileName = keyof typeof PROFILES;
 
 const maxMinutesFor = (p: ProfileName) =>
@@ -356,6 +361,17 @@ app.get("/api/areas", pollLimiter, async (_, res) => {
        FROM public.areas ORDER BY created_at`
   );
   res.json(r.rows);
+});
+
+// Merged coverage as one geometry. The map veils everything *outside* this,
+// and overlapping boxes would otherwise punch the veil twice and re-fill the
+// overlap (SVG evenodd), showing a dark patch inside covered ground.
+app.get("/api/coverage", pollLimiter, async (_, res) => {
+  const r = await pool.query(
+    `SELECT ST_AsGeoJSON(ST_Union(bbox))::jsonb AS g
+       FROM public.areas WHERE status = 'ready'`
+  );
+  res.json(r.rows[0]?.g ?? null);
 });
 
 app.get("/api/areas/:id", pollLimiter, async (req: any, res: any) => {

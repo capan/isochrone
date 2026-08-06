@@ -43,6 +43,15 @@ check(
   `${areas.length} total`
 );
 
+// 1b. merged coverage — the map veils everything outside this, and overlapping
+// boxes must arrive already unioned or the veil re-fills the overlap
+const cov = await (await fetch(`${API}/api/coverage`)).json();
+check(
+  cov && (cov.type === "Polygon" || cov.type === "MultiPolygon"),
+  "GET /api/coverage returns merged geometry",
+  cov?.type ?? "null"
+);
+
 // 2. request the area — either a fresh job or the dedup path
 const res = await fetch(`${API}/api/areas`, {
   method: "POST",

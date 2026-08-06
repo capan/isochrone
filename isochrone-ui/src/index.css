@@ -89,3 +89,25 @@ button:focus-visible {
   background: #e08c00;
   animation: import-pulse 1.1s ease-in-out infinite;
 }
+
+/* Permanent label on an in-flight import — a chip, not Leaflet's default
+   tooltip bubble, so it reads as part of the marching-ants rectangle. */
+.leaflet-tooltip.area-label {
+  background: rgba(224, 140, 0, 0.92);
+  border: none;
+  box-shadow: none;
+  color: #fff;
+  font: 11px system-ui;
+  padding: 2px 6px;
+}
+.leaflet-tooltip.area-label::before {
+  display: none;
+}
+
+/* Profile picker: drop the words on narrow screens so four options still fit
+   without wrapping over the map. Icons keep their title attribute. */
+@media (max-width: 560px) {
+  .profile-label {
+    display: none;
+  }
+}
