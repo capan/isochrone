@@ -33,23 +33,44 @@ const TARGET_SNAP_KM = 0.1;
 
 const errResult = (text) => ({ content: [{ type: "text", text }], isError: true });
 
+// profile → max minutes, fetched once. If the API is unreachable the caller
+// still gets a clear error from the isochrone request itself, so an empty map
+// here just means "fall back to the generic default".
+let capsCache;
+const caps = async () => {
+  if (capsCache) return capsCache;
+  try {
+    const r = await fetch(`${API}/api/profiles`);
+    const list = await r.json();
+    capsCache = Object.fromEntries(list.map((p) => [p.name, p.maxMinutes]));
+  } catch {
+    capsCache = {};
+  }
+  return capsCache;
+};
+
 const server = new McpServer({ name: "isochrone-mcp", version: "0.1.0" });
 
 server.registerTool(
   "reachable_area",
   {
-    title: "Pedestrian reachable area",
+    title: "Reachable area on foot or by bike",
     description:
-      "Computes the street network reachable on foot from a point within a time " +
-      "budget, for walk, stroller, or wheelchair mobility profiles (stairs and " +
-      "rough surfaces slow or block the latter two). Returns a summary with " +
-      "total street length, extent, and a map link. Currently covers Berlin, Germany.",
+      "Computes the street network reachable from a point within a time budget, " +
+      "for walk, stroller, wheelchair or bike profiles (steps and rough surfaces " +
+      "slow or block the middle two; cycle paths are bike-only). Returns a " +
+      "summary with total street length, extent, and a map link. " +
+      "Currently covers Berlin, Germany.",
     inputSchema: {
       lat: z.number().min(-90).max(90).describe("Origin latitude (WGS84)"),
       lon: z.number().min(-180).max(180).describe("Origin longitude (WGS84)"),
-      minutes: z.number().int().min(1).max(25).default(15)
-        .describe("Time budget in minutes (1–25)"),
-      profile: z.enum(["walk", "stroller", "wheelchair"]).default("walk")
+      minutes: z.number().int().min(1).max(25).optional()
+        .describe(
+          "Time budget in minutes. Faster profiles allow fewer: walking allows " +
+          "up to 25, cycling up to 10, because the work grows with the area " +
+          "searched. Omit to use the profile's sensible default."
+        ),
+      profile: z.enum(["walk", "stroller", "wheelchair", "bike"]).default("walk")
         .describe("Mobility profile"),
       target: z.object({
         lat: z.number().min(-90).max(90),
@@ -62,6 +83,9 @@ server.registerTool(
     annotations: { readOnlyHint: true, openWorldHint: true },
   },
   async ({ lat, lon, minutes, profile, target, include_geometry }) => {
+    // Ask the API for the caps rather than restating them: they are derived
+    // from a reach budget server-side and would drift the moment it changes.
+    minutes = minutes ?? Math.min(15, (await caps())[profile] ?? 15);
     const url = `${API}/api/isochrone?lat=${lat}&lon=${lon}&minutes=${minutes}&profile=${profile}`;
     let res;
     try {

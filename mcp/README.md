@@ -2,8 +2,9 @@
 
 MCP server for pedestrian isochrones: from a point, the actual street network
 reachable within a time budget — not a convex hull — for **walk**, **stroller**,
-and **wheelchair** profiles (stairs and rough surfaces slow or block the
-latter two). Backed by [iso.huseyincapan.dev](https://iso.huseyincapan.dev)
+**wheelchair** and **bike** profiles (stairs and rough surfaces slow or block
+strollers and wheelchairs; cycle paths are bike-only).
+Backed by [iso.huseyincapan.dev](https://iso.huseyincapan.dev)
 (OSM → pgRouting). **Currently covers Berlin, Germany.**
 
 This is a portfolio project. The API it calls is a single small VPS with a
@@ -29,8 +30,8 @@ Or in any MCP client config:
 | arg | | |
 |---|---|---|
 | `lat`, `lon` | required | origin (WGS84) |
-| `minutes` | default 15, max 25 | time budget |
-| `profile` | `walk` \| `stroller` \| `wheelchair` | mobility profile |
+| `minutes` | optional | time budget. Faster profiles allow fewer minutes (walk 25, bike 10) because the work grows with the area searched. Omit for the profile's default. |
+| `profile` | `walk` \| `stroller` \| `wheelchair` \| `bike` | mobility profile |
 | `target` | optional `{lat, lon}` | is this destination reachable, and when? |
 | `include_geometry` | default `false` | also return the raw GeoJSON bands |
 
@@ -49,5 +50,7 @@ Point it at your own deployment with `ISOCHRONE_API=https://your-host`.
 ## Caveats
 
 - Berlin only (for now). Anywhere else returns an "outside coverage" error.
+- The bike profile ignores one-way restrictions: the data doesn't record
+  where contraflow cycling is allowed, and in Berlin it usually is.
 - Stroller/wheelchair speed factors are reasoned estimates, not calibrated
   measurements.

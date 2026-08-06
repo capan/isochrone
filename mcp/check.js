@@ -40,6 +40,18 @@ const r4 = await call({ lat: 48.8566, lon: 2.3522 });
 assert(r4.isError, "Paris should error");
 assert(/coverage/i.test(text(r4)), `coverage prose: ${text(r4)}`);
 
+// bike: a distinct profile with its own, lower minute cap
+const rb = await call({ lat: 52.52, lon: 13.405, profile: "bike" });
+assert(!rb.isError, `bike errored: ${text(rb)}`);
+assert(/\(bike\)/.test(text(rb)), `bike labelled: ${text(rb)}`);
+// the default must respect the server's cap, not the generic 15
+assert(/^10 min \(bike\)/.test(text(rb)), `bike default minutes: ${text(rb)}`);
+
+// asking for more than a profile allows comes back as prose, not a 500
+const rc = await call({ lat: 52.52, lon: 13.405, profile: "bike", minutes: 20 });
+assert(rc.isError, "over-cap bike should error");
+assert(/10 or less/.test(text(rc)), `cap message: ${text(rc)}`);
+
 // cap enforced by schema before any fetch
 await assert.rejects(call({ lat: 52.52, lon: 13.405, minutes: 60 }).then((r) => {
   if (r.isError) throw new Error(text(r)); // schema rejection may surface either way
