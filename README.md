@@ -30,6 +30,21 @@ selected profile, so a profile is a few numbers rather than a schema change:
 
 These factors are estimates, not measurements — see *Calibration* below.
 
+## Ask Claude about it (MCP)
+
+The [`isochrone-mcp`](https://www.npmjs.com/package/isochrone-mcp) package lets
+any MCP client answer reachability questions against this API:
+
+```bash
+claude mcp add isochrone -- npx -y isochrone-mcp
+```
+
+![Claude answering a reachability question and opening the isochrone map](mcp/demo.gif)
+
+One tool, `reachable_area`: origin + minutes + profile, optional target
+("can I get there in time?"). Returns a prose summary and a map link, not
+coordinate soup. Details in [mcp/](mcp/).
+
 ## Dev
 
 Needs Postgres (PostGIS + pgRouting) on 5454 and Redis on 6363:
