@@ -51,6 +51,59 @@ const initialProfile = PROFILES.includes(urlProfile) ? urlProfile : PROFILES[0];
 const urlLat = parseFloat(urlParams.get("lat") ?? "");
 const urlLon = parseFloat(urlParams.get("lon") ?? "");
 
+const CARTO_ATTR =
+  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>';
+
+// Each style carries its own veil and ramp, because both sit *on top* of the
+// basemap and neither survives a theme flip untouched:
+//   · the veil marks "not imported" by darkening, and you cannot darken
+//     something already dark, so the dark theme lightens instead
+//   · the ramp runs light→dark for near→far, and its far end would vanish
+//     into a dark basemap, so that theme uses a ramp that stays bright
+const BASEMAPS = {
+  dark: {
+    label: "Dark Matter",
+    url: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+    attribution: CARTO_ATTR,
+    veil: "#f2f6fb",
+    veilOpacity: 0.1,
+    ramp: [
+      "#e6f0ff", "#cfe3ff", "#b6d4ff", "#9cc4fd", "#84b4f8",
+      "#6ca4f1", "#5793e6", "#4482d8", "#3572c8", "#2a63b5",
+    ],
+  },
+  voyager: {
+    label: "Voyager",
+    url: "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
+    attribution: CARTO_ATTR,
+    veil: "#0b1622",
+    veilOpacity: 0.24,
+    ramp: RAMP,
+  },
+  osm: {
+    label: "OpenStreetMap",
+    url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+    attribution:
+      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    veil: "#0b1622",
+    veilOpacity: 0.3,
+    ramp: RAMP,
+  },
+} as const;
+
+type BasemapKey = keyof typeof BASEMAPS;
+
+const BASEMAP_KEY = "isochrone.basemap";
+const savedBasemap = (): BasemapKey => {
+  try {
+    const k = localStorage.getItem(BASEMAP_KEY);
+    if (k && k in BASEMAPS) return k as BasemapKey;
+  } catch {
+    /* no storage; fall through to the default */
+  }
+  return "dark";
+};
+
 // Half-width of the box offered when someone clicks outside coverage: 2.5km
 // each way = a 5×5km area. The server buffers this by another 2.1km on every
 // side, so it actually imports ~85km² — keep MAX_AREA_KM2 above 25.
@@ -103,6 +156,10 @@ export default function MapView() {
   // profile → server-imposed minute cap, filled from /api/profiles on load
   const capsRef = useRef<Record<string, number>>({});
   const [shownMinutes, setShownMinutes] = useState(MAX_MINUTES);
+  // ref for the map effect (closes over it once), state for the legend
+  const basemapRef = useRef<BasemapKey>(savedBasemap());
+  const [basemapKey, setBasemapKey] = useState<BasemapKey>(basemapRef.current);
+  const basemap = BASEMAPS[basemapKey];
 
   const claimArea = (id: number) => {
     if (typeof id !== "number" || mineRef.current.has(id)) return;
@@ -161,9 +218,43 @@ export default function MapView() {
     const map = L.map("map").setView([52.52, 13.405], 13);
     mapRef.current = map;
 
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(
-      map
-    );
+    // L.control.layers already does base-layer switching, so there is no
+    // custom control to build — only the follow-on work Leaflet can't know
+    // about: the veil and the ramp restyle with the theme.
+    // {r} serves @2x tiles on retina. Attribution is a licence requirement;
+    // the layer this replaced declared none.
+    const layers = {} as Record<BasemapKey, L.TileLayer>;
+    const named: Record<string, L.TileLayer> = {};
+    for (const key of Object.keys(BASEMAPS) as BasemapKey[]) {
+      const cfg = BASEMAPS[key];
+      layers[key] = L.tileLayer(cfg.url, {
+        attribution: cfg.attribution,
+        maxZoom: 20,
+      });
+      named[cfg.label] = layers[key];
+    }
+    layers[basemapRef.current].addTo(map);
+    // topleft, not topright: the profile picker owns the top-right corner, and
+    // Leaflet only auto-spaces controls that live in the same corner stack.
+    L.control.layers(named, undefined, { position: "topleft" }).addTo(map);
+
+    map.on("baselayerchange", (e: L.LayersControlEvent) => {
+      const key = (Object.keys(BASEMAPS) as BasemapKey[]).find(
+        (k) => BASEMAPS[k].label === e.name
+      );
+      if (!key) return;
+      basemapRef.current = key;
+      setBasemapKey(key);
+      try {
+        localStorage.setItem(BASEMAP_KEY, key);
+      } catch {
+        /* the choice just won't survive a reload */
+      }
+      // Redraw immediately rather than waiting for the 5s poll, and repaint
+      // the isochrone so its ramp matches the new theme.
+      refreshAreas();
+      redrawRef.current();
+    });
 
     // A real Leaflet control rather than an absolutely positioned button:
     // Leaflet stacks and spaces the top-left corner itself, so this can't
@@ -257,8 +348,8 @@ export default function MapView() {
           ],
           {
             stroke: false,
-            fillColor: "#0b1622",
-            fillOpacity: 0.3,
+            fillColor: BASEMAPS[basemapRef.current].veil,
+            fillOpacity: BASEMAPS[basemapRef.current].veilOpacity,
             interactive: false,
           }
         ).addTo(group);
@@ -362,7 +453,11 @@ export default function MapView() {
           const until = (data.minutes / data.bands) * band;
 
           const layer = L.geoJSON(feature, {
-            style: { color: RAMP[band - 1], weight: 2, opacity: 0.9 },
+            style: {
+              color: BASEMAPS[basemapRef.current].ramp[band - 1],
+              weight: 2,
+              opacity: 0.9,
+            },
           })
             // identity never rests on color alone
             .bindTooltip(`≤ ${until.toFixed(1)} min`, { sticky: true })
@@ -645,7 +740,7 @@ export default function MapView() {
         {/* flex:1 rather than a fixed 16px — the legend box is as wide as its
             widest row, and a fixed ramp left a gap before the "15 min" label */}
         <div style={{ display: "flex" }}>
-          {RAMP.map((c) => (
+          {basemap.ramp.map((c) => (
             <div key={c} style={{ flex: 1, height: 10, background: c }} />
           ))}
         </div>
@@ -658,7 +753,8 @@ export default function MapView() {
             style={{
               width: 13,
               height: 8,
-              background: "rgba(11,22,34,0.3)",
+              background: basemap.veil,
+              opacity: basemap.veilOpacity * 3, // swatch is tiny; make it readable
             }}
           />
           not imported

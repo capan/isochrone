@@ -130,7 +130,7 @@ export default function HelpPanel({ onClose }: { onClose: () => void }) {
           >
             arrival time, light is sooner
           </Row>
-          <Row swatch={{ background: "rgba(11,22,34,0.3)" }}>not imported</Row>
+          <Row swatch={{ background: "rgba(11,22,34,0.18)" }}>not imported</Row>
           <Row swatch={{ border: "2px solid #7c4dff" }}>you requested it</Row>
           <Row swatch={{ border: "2px dashed #e08c00" }}>importing now</Row>
         </ul>
