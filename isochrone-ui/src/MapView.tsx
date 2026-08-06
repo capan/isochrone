@@ -155,6 +155,9 @@ export default function MapView() {
   const mineRef = useRef<Set<number>>(new Set(loadMine()));
   // profile → server-imposed minute cap, filled from /api/profiles on load
   const capsRef = useRef<Record<string, number>>({});
+  // increments per draw request, so a slow response can tell it has been
+  // overtaken and decline to paint itself over a newer one
+  const drawGenRef = useRef(0);
   const [shownMinutes, setShownMinutes] = useState(MAX_MINUTES);
   // ref for the map effect (closes over it once), state for the legend
   const basemapRef = useRef<BasemapKey>(savedBasemap());
@@ -397,10 +400,20 @@ export default function MapView() {
     refreshAreas();
     const areaTimer = setInterval(refreshAreas, 5000);
 
-    const updateIsochrones = async (lat: number, lng: number) => {
+    const clearIsochrone = () => {
       if (isochroneRef.current) {
         map.removeLayer(isochroneRef.current);
+        isochroneRef.current = null;
       }
+    };
+
+    const updateIsochrones = async (lat: number, lng: number) => {
+      // Clearing before the fetch looked right and wasn't: a second click
+      // cleared the map while the first request was still in flight, then the
+      // first response drew itself afterwards and stayed there forever. Tag
+      // each draw instead, drop stale responses, and swap layers in one step
+      // once the data is actually in hand.
+      const gen = ++drawGenRef.current;
 
       // pin the origin — the lightest band alone doesn't read as "you are
       // here". circleMarker, not marker: default icon PNGs don't survive vite.
@@ -429,6 +442,7 @@ export default function MapView() {
             `&profile=${profileRef.current}`
         );
         const data = await res.json();
+        if (gen !== drawGenRef.current) return; // a newer click already won
 
         if (!res.ok) {
           // Outside coverage is now an offer, not a dead end.
@@ -437,7 +451,7 @@ export default function MapView() {
           } else {
             showToast(data.detail ?? data.error ?? `Request failed (${res.status})`);
           }
-          isochroneRef.current = L.layerGroup([]).addTo(map);
+          clearIsochrone();
           return;
         }
 
@@ -460,8 +474,7 @@ export default function MapView() {
             },
           })
             // identity never rests on color alone
-            .bindTooltip(`≤ ${until.toFixed(1)} min`, { sticky: true })
-            .addTo(map);
+            .bindTooltip(`≤ ${until.toFixed(1)} min`, { sticky: true });
 
           layers.push(layer);
         }
@@ -472,10 +485,13 @@ export default function MapView() {
           );
         }
       } catch (err) {
+        if (gen !== drawGenRef.current) return;
         console.error("Isochrone network fetch failed", err);
         showToast("Could not reach the isochrone service — try again in a moment");
       }
 
+      if (gen !== drawGenRef.current) return;
+      clearIsochrone();
       isochroneRef.current = L.layerGroup(layers).addTo(map);
     };
     updateRef.current = updateIsochrones;
