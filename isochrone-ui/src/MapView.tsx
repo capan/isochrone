@@ -1,5 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import L from "leaflet";
+import HelpPanel from "./HelpPanel";
+
+// Shown once per browser, and any time via the button or a #how link. A first
+// visitor has no way to guess that the dark region is data they can request.
+const SEEN_HELP_KEY = "isochrone.seen-help";
+const seenHelp = () => {
+  try {
+    return localStorage.getItem(SEEN_HELP_KEY) === "1";
+  } catch {
+    return true; // no storage: don't nag on every load
+  }
+};
 
 // Preferred budget. The server caps faster profiles lower (a bike covers 3x
 // the ground per minute, and cost tracks area), so the real value per profile
@@ -115,6 +127,20 @@ export default function MapView() {
   // effect still reads the ref, which never goes stale inside its closure
   const [profile, setProfile] = useState(initialProfile);
   const [caps, setCaps] = useState<Record<string, number>>({});
+  const [help, setHelp] = useState(
+    () => window.location.hash === "#how" || !seenHelp()
+  );
+
+  const closeHelp = () => {
+    setHelp(false);
+    try {
+      localStorage.setItem(SEEN_HELP_KEY, "1");
+    } catch {
+      /* nothing to remember it with; the button is still there */
+    }
+    if (window.location.hash === "#how")
+      history.replaceState(null, "", window.location.pathname + window.location.search);
+  };
 
   const showToast = (msg: string) => {
     const el = toastRef.current;
@@ -138,6 +164,21 @@ export default function MapView() {
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(
       map
     );
+
+    // A real Leaflet control rather than an absolutely positioned button:
+    // Leaflet stacks and spaces the top-left corner itself, so this can't
+    // land on top of the zoom buttons whatever size they end up.
+    const HelpControl = L.Control.extend({
+      onAdd() {
+        const btn = L.DomUtil.create("button", "help-control");
+        btn.type = "button";
+        btn.textContent = "How it works";
+        L.DomEvent.disableClickPropagation(btn);
+        L.DomEvent.on(btn, "click", () => setHelp(true));
+        return btn;
+      },
+    });
+    new HelpControl({ position: "topleft" }).addTo(map);
 
     areasRef.current = L.layerGroup().addTo(map);
 
@@ -566,9 +607,15 @@ export default function MapView() {
                 cursor: "pointer",
                 padding: "6px 9px",
                 font: "inherit",
+                fontWeight: active ? 600 : 400,
                 lineHeight: 1.1,
-                color: active ? "#fff" : "#33383d",
-                background: active ? "#1c5cab" : "transparent",
+                // Light tint, not a dark fill: the bike and wheelchair emoji
+                // are natively blue and disappeared against a blue button, and
+                // whitening them via filter would flatten the stroller sign
+                // into a solid block.
+                color: active ? "#12447f" : "#33383d",
+                background: active ? "#dbe8fa" : "transparent",
+                boxShadow: active ? "inset 0 0 0 1px #9dc0ea" : "none",
               }}
             >
               <span style={{ fontSize: 15 }} aria-hidden="true">
@@ -646,6 +693,8 @@ export default function MapView() {
           claude mcp add isochrone -- npx -y isochrone-mcp
         </code>
       </div>
+
+      {help && <HelpPanel onClose={closeHelp} />}
 
       <div id="map" style={{ height: "100vh" }} />
     </>

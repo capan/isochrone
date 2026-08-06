@@ -111,3 +111,19 @@ button:focus-visible {
     display: none;
   }
 }
+
+/* "How it works" sits in Leaflet's top-left control stack, below the zoom
+   buttons, so the two can never overlap. */
+.help-control {
+  border: none;
+  border-radius: 9px;
+  cursor: pointer;
+  padding: 8px 12px;
+  font: 13px system-ui;
+  color: #33383d;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.28);
+}
+.help-control:hover {
+  background: #fff;
+}
