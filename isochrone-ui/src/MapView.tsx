@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import L from "leaflet";
 
+// Preferred budget. The server caps faster profiles lower (a bike covers 3x
+// the ground per minute, and cost tracks area), so the real value per profile
+// comes from /api/profiles and this is only ever an upper bound.
 const MAX_MINUTES = 15;
 const PROFILES = ["walk", "stroller", "wheelchair", "bike"];
 
@@ -76,6 +79,9 @@ export default function MapView() {
   const toastRef = useRef<HTMLDivElement | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const mineRef = useRef<Set<number>>(new Set(loadMine()));
+  // profile → server-imposed minute cap, filled from /api/profiles on load
+  const capsRef = useRef<Record<string, number>>({});
+  const [shownMinutes, setShownMinutes] = useState(MAX_MINUTES);
 
   const claimArea = (id: number) => {
     if (typeof id !== "number" || mineRef.current.has(id)) return;
@@ -111,6 +117,19 @@ export default function MapView() {
     );
 
     areasRef.current = L.layerGroup().addTo(map);
+
+    // The caps live on the server; asking beats restating them here.
+    fetch("/api/profiles")
+      .then((r) => r.json())
+      .then((list: { name: string; maxMinutes: number }[]) => {
+        for (const p of list) capsRef.current[p.name] = p.maxMinutes;
+        setShownMinutes(
+          Math.min(MAX_MINUTES, capsRef.current[profileRef.current] ?? MAX_MINUTES)
+        );
+      })
+      .catch(() => {
+        /* fall back to MAX_MINUTES; the server still enforces the real cap */
+      });
 
     // Every visitor polls the same registry, so an import someone else started
     // shows up on your map while it runs.
@@ -190,10 +209,15 @@ export default function MapView() {
       }
 
       const layers: L.Layer[] = [];
+      const minutes = Math.min(
+        MAX_MINUTES,
+        capsRef.current[profileRef.current] ?? MAX_MINUTES
+      );
+      setShownMinutes(minutes);
 
       try {
         const res = await fetch(
-          `/api/isochrone?lat=${lat}&lon=${lng}&minutes=${MAX_MINUTES}` +
+          `/api/isochrone?lat=${lat}&lon=${lng}&minutes=${minutes}` +
             `&profile=${profileRef.current}`
         );
         const data = await res.json();
@@ -441,7 +465,7 @@ export default function MapView() {
         </div>
         <div style={{ display: "flex", justifyContent: "space-between" }}>
           <span>0</span>
-          <span>{MAX_MINUTES} min</span>
+          <span>{shownMinutes} min</span>
         </div>
         <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 5 }}>
           <span

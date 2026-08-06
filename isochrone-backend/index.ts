@@ -101,7 +101,16 @@ const PROFILES = {
   },
 } as const;
 
+// MAX_MINUTES bounds CPU, but it was calibrated at walking speed: the cost of
+// a request tracks the *area* the bbox pre-filter hands pgRouting, so 25min
+// of cycling covers 9x the ground and measured 21s on the production box —
+// past the 15s statement_timeout and straight back into the DoS vector the
+// cap exists to close. Bound reach instead, so every profile costs the same.
+const MAX_REACH_M = MAX_MINUTES * 60 * PROFILES.walk.speed;
 type ProfileName = keyof typeof PROFILES;
+
+const maxMinutesFor = (p: ProfileName) =>
+  Math.min(MAX_MINUTES, Math.floor(MAX_REACH_M / (60 * PROFILES[p].speed)));
 
 // Time slices the client paints with a 10-step sequential ramp.
 const BANDS = 10;
@@ -370,8 +379,15 @@ app.use(
   })
 );
 
+// Objects, not bare names: the per-profile minute cap has to reach the client,
+// or the UI asks for 15 minutes of cycling and gets a 400 it can't explain.
 app.get("/api/profiles", (_, res) => {
-  res.json(Object.keys(PROFILES));
+  res.json(
+    (Object.keys(PROFILES) as ProfileName[]).map((name) => ({
+      name,
+      maxMinutes: maxMinutesFor(name),
+    }))
+  );
 });
 
 app.get("/api/cache-stats", (_, res) => {
@@ -714,10 +730,16 @@ app.get("/api/isochrone", async (req: any, res: any) => {
     return res.status(400).json({ error: "Invalid minutes list" });
   }
 
-  if (Math.max(...durations) > MAX_MINUTES) {
-    return res
-      .status(400)
-      .json({ error: `minutes must be ${MAX_MINUTES} or less` });
+  const cap = maxMinutesFor(profile);
+  if (Math.max(...durations) > cap) {
+    return res.status(400).json({
+      error: `minutes must be ${cap} or less for profile "${profile}"`,
+      detail:
+        cap < MAX_MINUTES
+          ? `Faster profiles get fewer minutes so every request covers a ` +
+            `similar area: ${Math.round(MAX_REACH_M)}m of reach.`
+          : undefined,
+    });
   }
 
   // Which imported area serves this point. Cache keys carry it too: the same
