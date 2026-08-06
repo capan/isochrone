@@ -622,6 +622,16 @@ const runImport = async (areaId: number) => {
          CREATE INDEX ON ${schemaName}.ways(target);
          CREATE INDEX ON ${schemaName}.ways USING GIST(geom);`
       );
+      // osm2pgrouting occasionally emits a way with no length or geometry
+      // (degenerate OSM input). It can't be routed on, and a NULL length makes
+      // a NULL cost, which pgr_connectedComponents rejects outright — taking
+      // the whole area's component flagging down with it.
+      const junk = await setup.query(
+        `DELETE FROM ${schemaName}.ways WHERE length_m IS NULL OR geom IS NULL`
+      );
+      if (junk.rowCount) {
+        console.log(`🧹 ${schemaName}: dropped ${junk.rowCount} way(s) with no length/geometry`);
+      }
       await setup.query(
         `UPDATE ${schemaName}.ways SET
            cost         = ROUND((length_m / CASE WHEN tag_id = 104 THEN 0.7 ELSE 1.4 END)::numeric, 2),
@@ -640,6 +650,10 @@ const runImport = async (areaId: number) => {
         "-p", process.env.PGPORT ?? "5454",
         "-U", process.env.PGUSER ?? "postgres",
         "-d", process.env.PGDATABASE ?? "osm_db",
+        // Without this psql prints the error, carries on, and exits 0 — which
+        // is how an area whose component flagging failed was still marked
+        // ready, then answered every click with "No nearest vertex found".
+        "-v", "ON_ERROR_STOP=1",
         "-v", `schema=${schemaName}`,
         "-f", MAIN_COMPONENT_SQL,
       ],
@@ -649,10 +663,18 @@ const runImport = async (areaId: number) => {
       }
     );
 
+    // Assert the graph is actually routable before advertising it. A schema
+    // with ways but no main component routes nowhere, and the only symptom
+    // used to be a 500 on the first click — long after the import "succeeded".
     const counts = await pool.query(
-      `SELECT count(*)::int AS ways FROM ${schemaName}.ways`
+      `SELECT (SELECT count(*) FROM ${schemaName}.ways)::int AS ways,
+              (SELECT count(*) FROM ${schemaName}.ways_vertices_pgr
+                WHERE main_component)::int AS routable`
     );
     if (!counts.rows[0].ways) throw new Error("no walkable ways in this area");
+    if (!counts.rows[0].routable) {
+      throw new Error("import produced no routable vertices");
+    }
 
     await pool.query(`UPDATE public.areas SET status = 'ready' WHERE id = $1`, [
       areaId,
@@ -782,7 +804,18 @@ app.get("/api/isochrone", async (req: any, res: any) => {
       [lonNum, latNum]
     );
     const row = vertexRes.rows[0];
-    if (!row) throw new Error("No nearest vertex found");
+    // Throwing here reached the client as an HTML stack trace exposing the
+    // source path. It means the schema has no routable vertex at all, which
+    // is a broken import rather than a bad request.
+    if (!row) {
+      console.error(`❌ ${schema} has no routable vertices`);
+      return res.status(503).json({
+        error: "coverage unavailable",
+        detail:
+          `The data for this area (${schema}) is incomplete and cannot be ` +
+          `routed on. It needs re-importing.`,
+      });
+    }
 
     if (row.dist_m > MAX_SNAP_M) {
       // Inside an imported area, importing again would change nothing: the
