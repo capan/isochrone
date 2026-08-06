@@ -27,6 +27,11 @@ const initialProfile = PROFILES.includes(urlProfile) ? urlProfile : PROFILES[0];
 const urlLat = parseFloat(urlParams.get("lat") ?? "");
 const urlLon = parseFloat(urlParams.get("lon") ?? "");
 
+// Coverage is Berlin; letting users pan to Paris just invites clicks the API
+// will refuse. Server-truth bbox lives in postgres — this is a padded copy
+// (same known duplication as PROFILES/MAX_MINUTES).
+const BERLIN_BOUNDS = L.latLngBounds([52.32, 13.06], [52.69, 13.79]);
+
 export default function MapView() {
   const mapRef = useRef<L.Map | null>(null);
   const isochroneRef = useRef<L.LayerGroup | null>(null);
@@ -34,13 +39,29 @@ export default function MapView() {
   const profileRef = useRef(initialProfile);
   const lastClickRef = useRef<[number, number] | null>(null);
   const redrawRef = useRef<() => void>(() => {});
+  const markerRef = useRef<L.CircleMarker | null>(null);
+  const toastRef = useRef<HTMLDivElement | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  const showToast = (msg: string) => {
+    const el = toastRef.current;
+    if (!el) return;
+    el.textContent = msg;
+    el.style.display = "block";
+    clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => (el.style.display = "none"), 5000);
+  };
 
   useEffect(() => {
     if (mapRef.current) {
       mapRef.current.remove();
     }
 
-    const map = L.map("map").setView([52.52, 13.405], 13);
+    const map = L.map("map", {
+      maxBounds: BERLIN_BOUNDS.pad(0.05),
+      maxBoundsViscosity: 1.0,
+      minZoom: 10,
+    }).setView([52.52, 13.405], 13);
     mapRef.current = map;
 
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(
@@ -53,6 +74,20 @@ export default function MapView() {
         map.removeLayer(isochroneRef.current);
       }
 
+      // pin the origin — the lightest band alone doesn't read as "you are
+      // here". circleMarker, not marker: default icon PNGs don't survive vite.
+      if (markerRef.current) {
+        markerRef.current.setLatLng([lat, lng]);
+      } else {
+        markerRef.current = L.circleMarker([lat, lng], {
+          radius: 7,
+          color: "#fff",
+          weight: 2,
+          fillColor: "#d33",
+          fillOpacity: 1,
+        }).addTo(map);
+      }
+
       const layers: L.Layer[] = [];
 
       try {
@@ -61,6 +96,12 @@ export default function MapView() {
             `&profile=${profileRef.current}`
         );
         const data = await res.json();
+
+        if (!res.ok) {
+          showToast(data.detail ?? data.error ?? `Request failed (${res.status})`);
+          isochroneRef.current = L.layerGroup([]).addTo(map);
+          return;
+        }
 
         // farthest band first, so nearer streets draw on top at junctions
         const features = [...data.geojson.features].sort(
@@ -82,10 +123,13 @@ export default function MapView() {
         }
 
         if (!features.length) {
-          console.warn("No reachable streets for this origin/profile");
+          showToast(
+            `No reachable streets here for "${profileRef.current}" — stairs or surfaces may block this origin`
+          );
         }
       } catch (err) {
         console.error("Isochrone network fetch failed", err);
+        showToast("Could not reach the isochrone service — try again in a moment");
       }
 
       isochroneRef.current = L.layerGroup(layers).addTo(map);
@@ -122,6 +166,25 @@ export default function MapView() {
 
   return (
     <>
+      <div
+        ref={toastRef}
+        style={{
+          display: "none",
+          position: "absolute",
+          top: 12,
+          left: "50%",
+          transform: "translateX(-50%)",
+          zIndex: 1100,
+          maxWidth: "80vw",
+          background: "#b3261e",
+          color: "#fff",
+          padding: "8px 14px",
+          borderRadius: 4,
+          font: "13px system-ui",
+          boxShadow: "0 2px 6px rgba(0,0,0,0.3)",
+        }}
+      />
+
       <select
         defaultValue={initialProfile}
         onChange={(e) => {
