@@ -66,3 +66,26 @@ button:focus-visible {
     background-color: #f9f9f9;
   }
 }
+
+/* Marching ants on areas still importing — the dash offset animates, so a
+   pending area reads as "in progress" without any JS ticking the map. */
+@keyframes area-dash {
+  to {
+    stroke-dashoffset: -24;
+  }
+}
+.area-importing {
+  animation: area-dash 1s linear infinite;
+}
+
+@keyframes import-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+.import-pulse {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #e08c00;
+  animation: import-pulse 1.1s ease-in-out infinite;
+}

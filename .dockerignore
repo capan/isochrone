@@ -1,9 +1,12 @@
 **/node_modules
 **/dist
 .git
-# 1.6GB of OSM extracts must never enter the build context
+# 1.6GB of OSM extracts must never enter the build context — but the importer
+# needs the tag config and the component SQL, so let those two files through.
 overpass/
+!overpass/osm-imports/mapconfig.xml
 scripts/
+!scripts/main_component.sql
 *.osm
 *.osm.pbf
 *.zip

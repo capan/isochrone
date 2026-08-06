@@ -5,9 +5,15 @@ import cors from "cors";
 import { createClient } from "redis";
 import rateLimit from "express-rate-limit";
 import fs from "fs";
+import os from "os";
 import path from "path";
+import { execFile } from "child_process";
+import { promisify } from "util";
+
+const execFileAsync = promisify(execFile);
 
 const app = express();
+app.use(express.json());
 const port = parseInt(process.env.PORT ?? "3001", 10);
 
 // A 60-minute walk costs ~25s of CPU and returns ~4.5MB — anyone could send
@@ -82,21 +88,188 @@ type ProfileName = keyof typeof PROFILES;
 // Time slices the client paints with a 10-step sequential ramp.
 const BANDS = 10;
 
+// --- self-service area import ------------------------------------------
+// Each imported area gets its own schema (osm2pgrouting numbers vertices from
+// 1 on every import, so one shared table would need id remapping; a schema
+// also makes deletion a DROP instead of a bloat-generating DELETE).
+const DEFAULT_SCHEMA = process.env.CITY ?? "berlin";
+
+// osm2pgrouting assigns the tag_ids that PROFILES keys off. There are two
+// mapconfig.xml files in this repo and only this one is pedestrian-tagged —
+// the other is car-oriented (steps=122), which would silently apply the
+// wheelchair rules to the wrong way types.
+const MAPCONFIG = process.env.MAPCONFIG ??
+  path.join(__dirname, "../overpass/osm-imports/mapconfig.xml");
+const MAIN_COMPONENT_SQL = process.env.MAIN_COMPONENT_SQL ??
+  path.join(__dirname, "../scripts/main_component.sql");
+const OVERPASS_URL =
+  process.env.OVERPASS_URL ?? "https://overpass-api.de/api/interpreter";
+
+// The UI offers a 5×5km box, so this has to sit above 25. Remember the buffer
+// roughly triples it: 25km² requested imports ~85km².
+const MAX_AREA_KM2 = parseFloat(process.env.MAX_AREA_KM2 ?? "30");
+
+// Imports are permanent and the box has 40GB. Postgres refusing writes is a
+// far worse failure than an area being evicted, so stay well short.
+//
+// Enforced by measuring after each import rather than estimating before one:
+// 6.5MB/km² holds for dense Berlin but overpredicts a sparse rural box by
+// ~50×, which would evict half the cache to make room for 3MB.
+const MAX_IMPORT_MB = parseInt(process.env.MAX_IMPORT_MB ?? "4000", 10);
+
+// Real bytes, not an estimate of what we think we wrote. Only area_* schemas
+// count — the shipped city isn't part of the user-imported budget.
+const importedMb = async () => {
+  const r = await pool.query(
+    `SELECT COALESCE(SUM(pg_total_relation_size(c.oid)), 0) / 1048576.0 AS mb
+       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname LIKE 'area\\_%'`
+  );
+  return parseFloat(r.rows[0].mb);
+};
+
+// Overpass 429s if you sprint through a queue; these are politeness, not tuning.
+const OVERPASS_PAUSE_MS = parseInt(process.env.OVERPASS_PAUSE_MS ?? "5000", 10);
+const RETRY_PAUSE_MS = parseInt(process.env.RETRY_PAUSE_MS ?? "20000", 10);
+const MAX_ATTEMPTS = 3;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Import a wider box than we serve: an isochrone starting near the edge walks
+// out past it, and a clipped network looks like a real answer instead of a
+// missing one. MAX_MINUTES at walking speed is the furthest anyone can get.
+const BUFFER_M = MAX_MINUTES * 60 * PROFILES.walk.speed;
+
+// The Overpass filter is derived from mapconfig rather than restated, so it
+// can't drift into fetching ways osm2pgrouting would then discard.
+const walkableHighways = () => {
+  const xml = fs.readFileSync(MAPCONFIG, "utf8");
+  const block = xml.match(/<tag_name name="highway"[\s\S]*?<\/tag_name>/)?.[0] ?? "";
+  return [...block.matchAll(/tag_value name="([^"]+)"/g)].map((m) => m[1]);
+};
+
+// Guards the worker loop, not the API: requests are queued in `public.areas`
+// and drained one at a time so two osm2pgrouting runs can't fight over a
+// 2-vCPU box — nobody is turned away, they just wait their turn.
+let importInFlight = false;
+
+// "jobs in front of this one" — defined once so the number returned at enqueue
+// and the number the poller reports can't disagree.
+const aheadSql = (alias: string) =>
+  `SELECT count(*) FROM public.areas q
+    WHERE q.status IN ('queued','importing') AND q.created_at < ${alias}.created_at`;
+
+const ensureAreasTable = async () => {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS public.areas (
+      id            serial PRIMARY KEY,
+      schema_name   text UNIQUE,
+      bbox          geometry(Polygon, 4326) NOT NULL,
+      imported_bbox geometry(Polygon, 4326) NOT NULL,
+      status        text NOT NULL DEFAULT 'queued',
+      error         text,
+      created_at    timestamptz NOT NULL DEFAULT now()
+    );
+    ALTER TABLE public.areas ADD COLUMN IF NOT EXISTS error text;
+    ALTER TABLE public.areas ADD COLUMN IF NOT EXISTS attempts int NOT NULL DEFAULT 0;
+    ALTER TABLE public.areas ADD COLUMN IF NOT EXISTS last_used_at timestamptz;
+    CREATE INDEX IF NOT EXISTS idx_areas_bbox ON public.areas USING GIST (bbox);
+  `);
+  // The shipped city is a schema, not an imported area. Give it a row so the
+  // map can draw every covered region from one endpoint instead of special
+  // casing it. Harmless if the schema isn't present (fresh deployment).
+  await pool
+    .query(
+      `INSERT INTO public.areas (schema_name, bbox, imported_bbox, status)
+       SELECT $1, ST_SetSRID(ST_Extent(geom)::geometry, 4326),
+                  ST_SetSRID(ST_Extent(geom)::geometry, 4326), 'ready'
+         FROM ${DEFAULT_SCHEMA}.ways_vertices_pgr WHERE main_component
+        HAVING ST_Extent(geom) IS NOT NULL
+       ON CONFLICT (schema_name) DO NOTHING`,
+      [DEFAULT_SCHEMA]
+    )
+    .catch((err) =>
+      console.log(`ℹ️ no ${DEFAULT_SCHEMA} schema to register:`, err.message)
+    );
+
+  // A crash mid-import leaves a row claiming 'importing' forever, and its
+  // schema half-built; re-queue it so the worker redoes it cleanly.
+  const stuck = await pool.query(
+    `UPDATE public.areas SET status = 'queued' WHERE status = 'importing'
+     RETURNING id`
+  );
+  if (stuck.rowCount) console.log(`↻ re-queued ${stuck.rowCount} stuck import(s)`);
+};
+
+// Which schema answers for this point: the smallest imported area containing
+// it, else the city this deployment shipped with.
+//
+// The same statement stamps last_used_at so eviction can be least-recently-
+// used rather than merely oldest. The stamp is throttled to once per 10
+// minutes per area, so the common case updates no rows and writes no WAL —
+// that is what makes LRU affordable on a read path.
+const resolveSchema = async (lat: number, lon: number) => {
+  const r = await pool.query(
+    `WITH pick AS (
+       SELECT id, schema_name FROM public.areas
+        WHERE status = 'ready'
+          AND ST_Contains(bbox, ST_SetSRID(ST_MakePoint($1, $2), 4326))
+        ORDER BY ST_Area(bbox) ASC
+        LIMIT 1
+     ), touch AS (
+       UPDATE public.areas SET last_used_at = now()
+        WHERE id = (SELECT id FROM pick)
+          AND (last_used_at IS NULL OR last_used_at < now() - interval '10 minutes')
+     )
+     SELECT schema_name FROM pick`,
+    [lon, lat]
+  );
+  return (r.rows[0]?.schema_name as string) ?? DEFAULT_SCHEMA;
+};
+
+// Imported areas are a cache, not durable state: every one of them can be
+// rebuilt from Overpass on demand. So when the budget is tight, drop the
+// least recently used rather than refusing the newcomer.
+const evictToFit = async () => {
+  let used = await importedMb();
+  while (used > MAX_IMPORT_MB) {
+    const victim = await pool.query(
+      `SELECT id, schema_name FROM public.areas
+        WHERE status = 'ready' AND schema_name LIKE 'area\\_%'
+        ORDER BY COALESCE(last_used_at, created_at) ASC
+        LIMIT 1`
+    );
+    const row = victim.rows[0];
+    if (!row) return false; // nothing evictable left; caller must refuse
+    await pool.query(`DROP SCHEMA IF EXISTS ${row.schema_name} CASCADE`);
+    await pool.query(`DELETE FROM public.areas WHERE id = $1`, [row.id]);
+    coverageBboxes.delete(row.schema_name);
+    const now = await importedMb();
+    console.log(
+      `🧹 evicted ${row.schema_name} (least recently used) — freed ${Math.round(
+        used - now
+      )}MB`
+    );
+    used = now;
+  }
+  return true;
+};
+
 // A click farther than this from any routable street is outside the imported
 // area. In-city snaps measure 7–67m; Paris would otherwise snap to Berlin's
 // westernmost vertex and return a silent empty result.
 const MAX_SNAP_M = 500;
 
-// Coverage extent, computed once for the 400 message.
-let coverageBbox: string | null = null;
-const getCoverage = async () => {
-  if (!coverageBbox) {
+// Coverage extent for the 400 message, memoized per schema — a single cached
+// string would go stale the moment a new area is imported.
+const coverageBboxes = new Map<string, string>();
+const getCoverage = async (schema: string) => {
+  if (!coverageBboxes.has(schema)) {
     const r = await pool.query(
-      "SELECT ST_Extent(geom)::text AS b FROM ways_vertices_pgr WHERE main_component"
+      `SELECT ST_Extent(geom)::text AS b FROM ${schema}.ways_vertices_pgr WHERE main_component`
     );
-    coverageBbox = r.rows[0]?.b ?? "unknown";
+    coverageBboxes.set(schema, r.rows[0]?.b ?? "unknown");
   }
-  return coverageBbox;
+  return coverageBboxes.get(schema);
 };
 
 // Builds the cost expression pgr_drivingDistance routes on. Numbers only —
@@ -131,6 +304,37 @@ app.get("/healthz", async (_, res) => {
   res.status(healthy ? 200 : 503).json({ healthy, checks });
 });
 
+// The overlay polls these continuously to show other people's imports, and
+// they are trivial reads. Charging them against the interactive budget meant
+// three imports could exhaust it — same reasoning as /healthz above.
+const pollLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: parseInt(process.env.POLL_LIMIT ?? "240", 10),
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: { error: "Polling too fast." },
+});
+
+app.get("/api/areas", pollLimiter, async (_, res) => {
+  const r = await pool.query(
+    `SELECT id, schema_name, status, created_at,
+            ST_YMin(bbox) AS min_lat, ST_XMin(bbox) AS min_lon,
+            ST_YMax(bbox) AS max_lat, ST_XMax(bbox) AS max_lon
+       FROM public.areas ORDER BY created_at`
+  );
+  res.json(r.rows);
+});
+
+app.get("/api/areas/:id", pollLimiter, async (req: any, res: any) => {
+  const r = await pool.query(
+    `SELECT id, schema_name, status, error, (${aheadSql("a")})::int AS ahead
+       FROM public.areas a WHERE id = $1`,
+    [parseInt(req.params.id, 10)]
+  );
+  if (!r.rows[0]) return res.status(404).json({ error: "No such area" });
+  res.json(r.rows[0]);
+});
+
 // Generous for a human clicking a map, fast to hit with a script.
 app.use(
   rateLimit({
@@ -156,6 +360,304 @@ app.get("/api/cache-stats", (_, res) => {
         : "N/A",
   });
 });
+
+// Importing is orders of magnitude more expensive than a query: Overpass is a
+// shared public resource and each area costs disk forever.
+const importLimiter = rateLimit({
+  windowMs: 60 * 60_000,
+  limit: parseInt(process.env.IMPORT_LIMIT ?? "10", 10),
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  // Only real imports should cost quota. Without this a mistyped box or a
+  // repeat request for an area that already exists burns the same budget as
+  // an actual osm2pgrouting run — the smoke check alone spends three.
+  skipFailedRequests: true,
+  message: {
+    error: "Import limit reached (10/hour). Try again later.",
+  },
+});
+
+app.post("/api/areas", importLimiter, async (req: any, res: any) => {
+  const { minLat, minLon, maxLat, maxLon } = req.body ?? {};
+  const nums = [minLat, minLon, maxLat, maxLon].map(Number);
+
+  if (nums.some((n) => !isFinite(n))) {
+    return res
+      .status(400)
+      .json({ error: "Need numeric minLat, minLon, maxLat, maxLon" });
+  }
+  const [s, w, n, e] = nums;
+  if (s >= n || w >= e) {
+    return res.status(400).json({ error: "min must be less than max" });
+  }
+
+  // Rough but honest at city scale; the cap only needs the right magnitude.
+  const midLat = (s + n) / 2;
+  const heightKm = (n - s) * 111.32;
+  const widthKm = (e - w) * 111.32 * Math.cos((midLat * Math.PI) / 180);
+  const areaKm2 = heightKm * widthKm;
+  if (areaKm2 > MAX_AREA_KM2) {
+    return res.status(400).json({
+      error: `Area is ${areaKm2.toFixed(1)}km²; max is ${MAX_AREA_KM2}km²`,
+    });
+  }
+
+  // Already covered? Serving an existing area beats importing a duplicate.
+  const existing = await pool.query(
+    `SELECT id, schema_name FROM public.areas
+      WHERE status = 'ready'
+        AND ST_Contains(bbox, ST_MakeEnvelope($1, $2, $3, $4, 4326))
+      LIMIT 1`,
+    [w, s, e, n]
+  );
+  if (existing.rows[0]) {
+    // id included so the client can claim it locally even when it was
+    // somebody else's import that already covered this spot.
+    return res.json({
+      id: existing.rows[0].id,
+      status: "ready",
+      schema: existing.rows[0].schema_name,
+      reused: true,
+    });
+  }
+
+  // Make room before starting rather than after, so a full budget fails fast.
+  if (!(await evictToFit())) {
+    return res.status(507).json({
+      error:
+        `Import budget of ${MAX_IMPORT_MB}MB is full and there is nothing ` +
+        `left to evict. Ask the operator to raise MAX_IMPORT_MB.`,
+    });
+  }
+
+  // Queued, not rejected: the box can only run one import at a time, but that
+  // is this machine's problem, not the second person's.
+  const dLat = BUFFER_M / 111320;
+  const dLon = BUFFER_M / (111320 * Math.cos((midLat * Math.PI) / 180));
+  const ins = await pool.query(
+    `INSERT INTO public.areas (bbox, imported_bbox, status)
+     VALUES (ST_MakeEnvelope($1,$2,$3,$4,4326),
+             ST_MakeEnvelope($5,$6,$7,$8,4326), 'queued')
+     RETURNING id`,
+    [w, s, e, n, w - dLon, s - dLat, e + dLon, n + dLat]
+  );
+  const id: number = ins.rows[0].id;
+  // Counted in its own statement: a subquery in RETURNING cannot see the row
+  // it is inserting, which made the first job report a queue position of -1.
+  const q = await pool.query(
+    `UPDATE public.areas SET schema_name = $2 WHERE id = $1
+     RETURNING (${aheadSql("areas")})::int AS ahead`,
+    [id, `area_${id}`]
+  );
+  const ahead: number = q.rows[0].ahead;
+
+  // ~1s/km² of imported area was measured on dense Berlin; sparse areas beat
+  // it comfortably, so this reads as an upper bound rather than a promise.
+  const bufferKm = (BUFFER_M / 1000) * 2;
+  const eachSeconds = Math.max(
+    15,
+    Math.round((heightKm + bufferKm) * (widthKm + bufferKm))
+  );
+
+  drainQueue(); // fire and forget; the worker serializes
+  res.status(202).json({
+    id,
+    status: "queued",
+    ahead,
+    poll: `/api/areas/${id}`,
+    estimateSeconds: eachSeconds * (ahead + 1),
+  });
+});
+
+// One import at a time, oldest first. The areas table is the queue — a broker
+// would buy nothing while there is a single app process.
+// ponytail: single-process worker. Two app replicas would need
+// SELECT ... FOR UPDATE SKIP LOCKED here, or a real broker.
+const runImport = async (areaId: number) => {
+  const start = Date.now();
+  const row = (
+    await pool.query(
+      `SELECT schema_name, attempts,
+              ST_YMin(imported_bbox) AS s, ST_XMin(imported_bbox) AS w,
+              ST_YMax(imported_bbox) AS n, ST_XMax(imported_bbox) AS e
+         FROM public.areas WHERE id = $1`,
+      [areaId]
+    )
+  ).rows[0];
+  const schemaName: string = row.schema_name;
+  const attempts: number = row.attempts;
+  const [bs, bw, bn, be] = [row.s, row.w, row.n, row.e];
+  const osmFile = path.join(os.tmpdir(), `area-${areaId}.osm`);
+
+  try {
+    await pool.query(
+      `UPDATE public.areas SET status = 'importing' WHERE id = $1`,
+      [areaId]
+    );
+
+    const query =
+      `[out:xml][timeout:90];way["highway"~"^(${walkableHighways().join("|")})$"]` +
+      `(${bs},${bw},${bn},${be});(._;>;);out body;`;
+    const osm = await fetch(OVERPASS_URL, {
+      method: "POST",
+      // Node's default UA ("node") is rejected by Overpass's Apache with a 406
+      // before the query is ever parsed; their usage policy wants an
+      // identifying agent anyway.
+      headers: { "User-Agent": "isochrone/0.1 (+https://iso.huseyincapan.dev)" },
+      body: new URLSearchParams({ data: query }),
+      signal: AbortSignal.timeout(120_000),
+    });
+    if (!osm.ok) {
+      const err: any = new Error(`Overpass returned ${osm.status}`);
+      // 429 = their fair-use slot limit, 504 = query timed out under load.
+      // Both mean "later", not "never".
+      err.retryable = osm.status === 429 || osm.status === 504;
+      throw err;
+    }
+    fs.writeFileSync(osmFile, Buffer.from(await osm.arrayBuffer()));
+
+    await pool.query(`CREATE SCHEMA ${schemaName}`);
+    await execFileAsync(
+      "osm2pgrouting",
+      [
+        "-f", osmFile,
+        "-d", process.env.PGDATABASE ?? "osm_db",
+        "-U", process.env.PGUSER ?? "postgres",
+        "-W", process.env.PGPASSWORD ?? "password",
+        "-h", process.env.PGHOST ?? "127.0.0.1",
+        "-p", process.env.PGPORT ?? "5454",
+        "-c", MAPCONFIG,
+        "--schema", schemaName,
+        "--clean",
+      ],
+      { timeout: 300_000, maxBuffer: 10 * 1024 * 1024 }
+    );
+
+    // Same post-processing import_city.sh does — indexes, then cost in walking
+    // seconds (main_component reads cost, so it has to run after).
+    const setup = await pool.connect();
+    try {
+      await setup.query("SET statement_timeout = 300000");
+      // osm2pgrouting 2.3.8 (Debian) writes gid/the_geom; 3.0.0 (brew, and
+      // what Berlin was imported with) writes id/geom. Normalize to the
+      // newer names so one query shape works whichever tool built the schema.
+      await setup.query(`
+        DO $$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM information_schema.columns
+                      WHERE table_schema = '${schemaName}' AND table_name = 'ways'
+                        AND column_name = 'gid') THEN
+            EXECUTE 'ALTER TABLE ${schemaName}.ways RENAME COLUMN gid TO id';
+          END IF;
+          IF EXISTS (SELECT 1 FROM information_schema.columns
+                      WHERE table_schema = '${schemaName}' AND table_name = 'ways'
+                        AND column_name = 'the_geom') THEN
+            EXECUTE 'ALTER TABLE ${schemaName}.ways RENAME COLUMN the_geom TO geom';
+          END IF;
+          IF EXISTS (SELECT 1 FROM information_schema.columns
+                      WHERE table_schema = '${schemaName}' AND table_name = 'ways_vertices_pgr'
+                        AND column_name = 'the_geom') THEN
+            EXECUTE 'ALTER TABLE ${schemaName}.ways_vertices_pgr RENAME COLUMN the_geom TO geom';
+          END IF;
+        END $$;
+      `);
+      await setup.query(
+        `CREATE INDEX ON ${schemaName}.ways(source);
+         CREATE INDEX ON ${schemaName}.ways(target);
+         CREATE INDEX ON ${schemaName}.ways USING GIST(geom);`
+      );
+      await setup.query(
+        `UPDATE ${schemaName}.ways SET
+           cost         = ROUND((length_m / CASE WHEN tag_id = 104 THEN 0.7 ELSE 1.4 END)::numeric, 2),
+           reverse_cost = ROUND((length_m / CASE WHEN tag_id = 104 THEN 0.7 ELSE 1.4 END)::numeric, 2)`
+      );
+    } finally {
+      setup.release();
+    }
+
+    // Run the canonical file rather than restating its logic here — a second
+    // copy of the component flagging is exactly how the warmers drifted.
+    await execFileAsync(
+      "psql",
+      [
+        "-h", process.env.PGHOST ?? "127.0.0.1",
+        "-p", process.env.PGPORT ?? "5454",
+        "-U", process.env.PGUSER ?? "postgres",
+        "-d", process.env.PGDATABASE ?? "osm_db",
+        "-v", `schema=${schemaName}`,
+        "-f", MAIN_COMPONENT_SQL,
+      ],
+      {
+        timeout: 300_000,
+        env: { ...process.env, PGPASSWORD: process.env.PGPASSWORD ?? "password" },
+      }
+    );
+
+    const counts = await pool.query(
+      `SELECT count(*)::int AS ways FROM ${schemaName}.ways`
+    );
+    if (!counts.rows[0].ways) throw new Error("no walkable ways in this area");
+
+    await pool.query(`UPDATE public.areas SET status = 'ready' WHERE id = $1`, [
+      areaId,
+    ]);
+    console.log(
+      `✅ imported ${schemaName} (${counts.rows[0].ways} ways) in ${
+        Date.now() - start
+      }ms — ${Math.round(await importedMb())}MB of ${MAX_IMPORT_MB}MB used`
+    );
+    // Measured, not predicted. The area just imported sorts newest, so it is
+    // never its own victim.
+    await evictToFit();
+  } catch (err) {
+    console.error(`❌ import of ${schemaName} failed:`, err);
+    // A half-imported schema would answer queries with a broken graph. The row
+    // stays so the poller can report the failure instead of 404ing.
+    await pool
+      .query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`)
+      .catch(() => {});
+    const retryable = (err as any).retryable === true && attempts + 1 < MAX_ATTEMPTS;
+    await pool
+      .query(
+        `UPDATE public.areas
+            SET status = $3, error = $2, attempts = attempts + 1
+          WHERE id = $1`,
+        [areaId, (err as Error).message.slice(0, 500), retryable ? "queued" : "failed"]
+      )
+      .catch(() => {});
+    if (retryable) {
+      console.log(`↻ ${schemaName} will retry (attempt ${attempts + 2})`);
+      await sleep(RETRY_PAUSE_MS);
+    }
+  } finally {
+    fs.rmSync(osmFile, { force: true });
+  }
+};
+
+const drainQueue = async () => {
+  if (importInFlight) return;
+  importInFlight = true;
+  try {
+    for (;;) {
+      const next = await pool.query(
+        `SELECT id FROM public.areas WHERE status = 'queued'
+          ORDER BY attempts, created_at LIMIT 1`
+      );
+      if (!next.rows[0]) return;
+      await runImport(next.rows[0].id);
+      // Public Overpass is a shared resource: back-to-back imports earned a
+      // 429 within seconds. Pace the queue rather than sprint through it.
+      await sleep(OVERPASS_PAUSE_MS);
+    }
+  } catch (err) {
+    console.error("⚠️ queue drain stopped:", (err as Error).message);
+  } finally {
+    importInFlight = false;
+  }
+};
+
+// A queued retry has nothing to wake it, so re-check periodically.
+setInterval(() => void drainQueue(), 30_000).unref?.();
 
 app.get("/api/isochrone", async (req: any, res: any) => {
   const start = Date.now();
@@ -194,7 +696,11 @@ app.get("/api/isochrone", async (req: any, res: any) => {
       .json({ error: `minutes must be ${MAX_MINUTES} or less` });
   }
 
-  const vertexKey = `vertex:${latNum.toFixed(5)},${lonNum.toFixed(5)}`;
+  // Which imported area serves this point. Cache keys carry it too: the same
+  // coordinates snap to a different vertex id in a different schema.
+  const schema = await resolveSchema(latNum, lonNum);
+
+  const vertexKey = `vertex:${schema}:${latNum.toFixed(5)},${lonNum.toFixed(5)}`;
   let vertexIdStr = await cacheGet(vertexKey);
   let vertexId: number;
 
@@ -209,7 +715,7 @@ app.get("/api/isochrone", async (req: any, res: any) => {
     // Populated by scripts/main_component.sql.
     const vertexRes = await pool.query(
       `SELECT id, ST_Distance(geom::geography, ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography) AS dist_m
-       FROM ways_vertices_pgr WHERE main_component
+       FROM ${schema}.ways_vertices_pgr WHERE main_component
        ORDER BY geom <-> ST_SetSRID(ST_MakePoint($1, $2), 4326) LIMIT 1`,
       [lonNum, latNum]
     );
@@ -221,7 +727,9 @@ app.get("/api/isochrone", async (req: any, res: any) => {
         error: "outside coverage",
         detail: `Nearest routable street is ${Math.round(
           row.dist_m / 1000
-        )}km away. This deployment covers Berlin, Germany (bbox ${await getCoverage()}).`,
+        )}km away. Imported coverage here is ${schema} (bbox ${await getCoverage(
+          schema
+        )}). POST /api/areas with a bbox to import a new area.`,
       });
     }
     vertexId = row.id;
@@ -247,7 +755,7 @@ app.get("/api/isochrone", async (req: any, res: any) => {
       6
     )}, ${latNum.toFixed(6)}), 4326), ` +
     `${dLon.toFixed(6)}, ${dLat.toFixed(6)})`;
-  const redisKey = `net:${latNum.toFixed(5)},${lonNum.toFixed(
+  const redisKey = `net:${schema}:${latNum.toFixed(5)},${lonNum.toFixed(
     5
   )}:${duration}:${profile}`;
 
@@ -268,7 +776,7 @@ app.get("/api/isochrone", async (req: any, res: any) => {
              profile
            )} AS cost, ${costExpr(
         profile
-      )} AS reverse_cost FROM ways WHERE ${bbox}',
+      )} AS reverse_cost FROM ${schema}.ways WHERE ${bbox}',
            $1::integer,
            $2::double precision
          )
@@ -280,7 +788,7 @@ app.get("/api/isochrone", async (req: any, res: any) => {
                   GREATEST(1, CEIL(dd.agg_cost / ($2::double precision / $3::integer)))
                 )::integer AS band,
                 ST_Collect(w.geom) AS geom
-         FROM dd JOIN ways w ON w.id = dd.edge
+         FROM dd JOIN ${schema}.ways w ON w.id = dd.edge
          GROUP BY 1
        )
        SELECT COALESCE(
@@ -329,6 +837,12 @@ if (fs.existsSync(uiDist)) {
   app.use(express.static(uiDist));
   console.log(`📦 Serving UI from ${uiDist}`);
 }
+
+ensureAreasTable()
+  .then(drainQueue)
+  .catch((err) =>
+    console.error("⚠️ could not ensure areas table:", (err as Error).message)
+  );
 
 app.listen(port, () => {
   console.log(`🚀 Isochrone backend running at http://localhost:${port}`);
