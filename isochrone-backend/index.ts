@@ -77,10 +77,28 @@ const pool = new Pool({
 // Walking speed in m/s, plus per-way-type multipliers (0 = impassable).
 // tag_id values come from the `configuration` table osm2pgrouting writes:
 // 103 path, 104 steps, 105 living_street, 107 track.
+// tag_id 113 (dedicated cycleway) is impassable on foot, so the three
+// pedestrian profiles are unchanged by its arrival.
+//
+// `bike` at 4.2 m/s ≈ 15 km/h, an ordinary urban cycling average. It rides
+// footways and pedestrian zones at pushing pace rather than treating them as
+// walls, because a rider dismounts rather than turns back.
+//
+// It deliberately ignores one-way restrictions: osm2pgrouting records the
+// `oneway` tag but not `oneway:bicycle=no`, and Berlin permits contraflow
+// cycling on most one-way streets — enforcing the column we have would block
+// streets riders legally use, which is the more wrong of the two answers.
 const PROFILES = {
-  walk: { speed: 1.4, factors: { 104: 0.5 } },
-  stroller: { speed: 1.2, factors: { 104: 0, 103: 0.6, 107: 0.6 } },
-  wheelchair: { speed: 0.9, factors: { 104: 0, 103: 0, 107: 0, 105: 0.9 } },
+  walk: { speed: 1.4, factors: { 104: 0.5, 113: 0 } },
+  stroller: { speed: 1.2, factors: { 104: 0, 103: 0.6, 107: 0.6, 113: 0 } },
+  wheelchair: {
+    speed: 0.9,
+    factors: { 104: 0, 103: 0, 107: 0, 105: 0.9, 113: 0 },
+  },
+  bike: {
+    speed: 4.2,
+    factors: { 104: 0, 101: 0.25, 102: 0.3, 103: 0.6, 107: 0.5 },
+  },
 } as const;
 
 type ProfileName = keyof typeof PROFILES;
@@ -223,7 +241,13 @@ const resolveSchema = async (lat: number, lon: number) => {
      SELECT schema_name FROM pick`,
     [lon, lat]
   );
-  return (r.rows[0]?.schema_name as string) ?? DEFAULT_SCHEMA;
+  // `matched` distinguishes "no area covers this point" from "an area covers
+  // it but the click landed off the pedestrian network" — the two produce
+  // very different advice, and only the first is fixable by importing.
+  return {
+    schema: (r.rows[0]?.schema_name as string) ?? DEFAULT_SCHEMA,
+    matched: Boolean(r.rows[0]),
+  };
 };
 
 // Imported areas are a cache, not durable state: every one of them can be
@@ -698,7 +722,7 @@ app.get("/api/isochrone", async (req: any, res: any) => {
 
   // Which imported area serves this point. Cache keys carry it too: the same
   // coordinates snap to a different vertex id in a different schema.
-  const schema = await resolveSchema(latNum, lonNum);
+  const { schema, matched } = await resolveSchema(latNum, lonNum);
 
   const vertexKey = `vertex:${schema}:${latNum.toFixed(5)},${lonNum.toFixed(5)}`;
   let vertexIdStr = await cacheGet(vertexKey);
@@ -723,6 +747,18 @@ app.get("/api/isochrone", async (req: any, res: any) => {
     if (!row) throw new Error("No nearest vertex found");
 
     if (row.dist_m > MAX_SNAP_M) {
+      // Inside an imported area, importing again would change nothing: the
+      // spot is simply off the walkable network (a field, a lake, a motorway
+      // verge). Say so instead of offering a pointless import.
+      if (matched) {
+        return res.status(400).json({
+          error: "no street nearby",
+          detail:
+            `This area is imported, but the nearest walkable street is ` +
+            `${Math.round(row.dist_m)}m away — farther than the ${MAX_SNAP_M}m ` +
+            `snapping limit. Click closer to a road or path.`,
+        });
+      }
       return res.status(400).json({
         error: "outside coverage",
         detail: `Nearest routable street is ${Math.round(

@@ -11,6 +11,19 @@
     <tag_value name="residential" id="106" />
     <tag_value name="track" id="107" />
     <tag_value name="unclassified" id="108" />
+    <!-- Kreis-/Landesstraßen. Excluded originally because city arterials have
+         separately mapped sidewalks, but rural villages are often linked only
+         by these — without them a 5x5km rural import is disconnected islands
+         and clicks land >500m from any way. Ids 109/110 are new, so the
+         103/104/105/107 that PROFILES depends on are untouched. -->
+    <tag_value name="tertiary" id="109" />
+    <tag_value name="tertiary_link" id="110" />
+    <tag_value name="secondary" id="111" />
+    <tag_value name="secondary_link" id="112" />
+    <!-- Dedicated cycle paths. Bike-only: the `bike` profile rides them at
+         full speed, the three pedestrian profiles treat them as impassable,
+         so adding this does not change any walking result. -->
+    <tag_value name="cycleway" id="113" />
   </tag_name>
 
   <tag_name name="cycleway" id="2">

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import L from "leaflet";
 
 const MAX_MINUTES = 15;
-const PROFILES = ["walk", "stroller", "wheelchair"];
+const PROFILES = ["walk", "stroller", "wheelchair", "bike"];
 
 // Sequential single-hue ramp, light→dark = near→far. Starts at step 250, the
 // lightest that still clears contrast against the basemap.
@@ -433,7 +433,7 @@ export default function MapView() {
           color: "#52514e",
         }}
       >
-        <div style={{ marginBottom: 4, color: "#0b0b0b" }}>walking time</div>
+        <div style={{ marginBottom: 4, color: "#0b0b0b" }}>travel time</div>
         <div style={{ display: "flex" }}>
           {RAMP.map((c) => (
             <div key={c} style={{ width: 16, height: 10, background: c }} />
