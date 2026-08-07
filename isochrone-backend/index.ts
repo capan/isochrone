@@ -701,6 +701,26 @@ app.post("/api/areas", importLimiter, async (req: any, res: any) => {
   });
 });
 
+// The five OSM keys Berlin's own extract was filtered on (`osmium tags-filter
+// nwr/amenity nwr/shop nwr/tourism nwr/historic nwr/leisure`). On-demand
+// imports fetched only the first two, so *every* kind under leisure (park,
+// playground, pitch, sports_centre, swimming_pool…) and most of culture
+// (tourism, historic) could not exist outside Berlin — two of the seven groups
+// were permanently greyed out in every imported area, with nothing saying why.
+// Measured on production: Berlin 20,323 outdoors / 3,803 culture, an imported
+// area 0 / 0.
+//
+// Order is precedence, not preference: the first key an object carries decides
+// its category.
+const POI_TAGS = ["amenity", "shop", "tourism", "historic", "leisure"] as const;
+
+// Widening the tag set only helps areas that get re-fetched, and every area
+// already carries a pois_at stamp, so the sweep would skip them forever.
+// Re-sweep anything stamped before the wider query shipped; once each has been
+// redone the clause matches nothing and the sweep goes quiet again. Cheaper
+// than a version column and it needs no manual SQL step at deploy time.
+const POI_TAGS_SINCE = process.env.POI_TAGS_SINCE ?? "2026-08-08T00:00:00Z";
+
 // POIs live in one global table, independent of the routing schemas, so this
 // is additive: it can run during an import or long afterwards, and running it
 // twice costs nothing (ON CONFLICT DO NOTHING on the OSM id).
@@ -720,8 +740,9 @@ const loadPois = async (
 ) => {
   try {
     const poiQuery =
-      `[out:json][timeout:120];(nwr["amenity"](${s},${w},${n},${e});` +
-      `nwr["shop"](${s},${w},${n},${e}););out center tags;`;
+      `[out:json][timeout:180];(` +
+      POI_TAGS.map((t) => `nwr["${t}"](${s},${w},${n},${e});`).join("") +
+      `);out center tags;`;
     let pr: Response | undefined;
     for (let attempt = 0; attempt < 3; attempt++) {
       await sleep(attempt === 0 ? 3000 : 15000);
@@ -740,7 +761,10 @@ const loadPois = async (
       .map((el: any) => {
         const y = el.lat ?? el.center?.lat;
         const x = el.lon ?? el.center?.lon;
-        const cat = el.tags?.amenity ? "amenity" : el.tags?.shop ? "shop" : null;
+        // First match wins, so an object tagged both leisure=park and
+        // amenity=cafe files under the amenity — the same precedence the
+        // pedestrian-facing groups assume.
+        const cat = POI_TAGS.find((t) => el.tags?.[t]) ?? null;
         if (y == null || x == null || !cat) return null;
         return [el.type[0], el.id, cat, el.tags[cat], el.tags.name ?? null, x, y];
       })
@@ -1014,13 +1038,21 @@ const sweepPois = async () => {
     //
     // The same buffered box the import used — a served area walks out past its
     // own edge, so its amenities have to as well.
+    // `schema_name LIKE area_%` is a hard guard, not a tidy-up: the shipped
+    // city is a row in this table too, its POIs came from a local extract, and
+    // sweeping it would ask the public Overpass API for a Berlin-sized bbox.
+    // It used to be excluded only by having been stamped at bootstrap, which
+    // the POI_TAGS_SINCE clause below would have undone.
     const next = await pool.query(
       `SELECT id, schema_name,
               ST_YMin(imported_bbox) AS s, ST_XMin(imported_bbox) AS w,
               ST_YMax(imported_bbox) AS n, ST_XMax(imported_bbox) AS e
          FROM public.areas
-        WHERE status = 'ready' AND pois_at IS NULL
-        ORDER BY COALESCE(last_used_at, created_at) DESC LIMIT 1`
+        WHERE status = 'ready'
+          AND schema_name LIKE 'area\\_%'
+          AND (pois_at IS NULL OR pois_at < $1)
+        ORDER BY COALESCE(last_used_at, created_at) DESC LIMIT 1`,
+      [POI_TAGS_SINCE]
     );
     const a = next.rows[0];
     if (!a) return;
