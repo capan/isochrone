@@ -38,7 +38,7 @@ services:
       CITY: ${CITY:-berlin}
       MAX_MINUTES: ${MAX_MINUTES:-25}
       RATE_LIMIT: ${RATE_LIMIT:-60}
-      IMPORT_LIMIT: ${IMPORT_LIMIT:-1}
+      IMPORT_LIMIT: ${IMPORT_LIMIT:-3}
       MAX_AREA_KM2: ${MAX_AREA_KM2:-30}
       MAX_IMPORT_MB: ${MAX_IMPORT_MB:-4000}
     # no ports: reachable only through caddy

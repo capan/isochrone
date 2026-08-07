@@ -523,6 +523,11 @@ app.get("/api/cache-stats", (_, res) => {
 // shared public resource and each area costs disk forever.
 // Per IP, not global: ten people each importing one area is fine and they all
 // get served — the queue orders them, it doesn't turn anyone away.
+// ⚠️ The deployed value lives in docker-compose.yml (`IMPORT_LIMIT:
+// ${IMPORT_LIMIT:-3}`), which sets the variable unconditionally — so this
+// fallback never fires under compose. Change it there, not here. What is left
+// here is only what a bare `npx ts-node` run gets, kept conservative on
+// purpose: local testing should not out-import the deployment.
 const IMPORT_LIMIT = parseInt(process.env.IMPORT_LIMIT ?? "1", 10);
 
 // Shared by the rate limiter and the handler: a payload only costs quota if it
@@ -544,9 +549,9 @@ const parseBox = (body: any) => {
   };
 };
 
-// Own store and key function so a failed import can hand the slot back. With
-// one import an hour, spending it on an area that then fails to build would
-// otherwise lock someone out for an hour having got nothing.
+// Own store and key function so a failed import can hand the slot back. The
+// budget is small enough that spending a slot on an area which then fails to
+// build would lock someone out for an hour having got nothing.
 const importStore = new MemoryStore();
 const importKey = (req: any) => String(req.ip ?? "unknown");
 const pendingKey = new Map<number, string>();
