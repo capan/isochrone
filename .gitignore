@@ -18,5 +18,7 @@ performance.txt
 .DS_Store
 __MACOSX/
 
-# claude artifacts
+# claude artifacts — working memory, deliberately not published
 HANDOFF.md
+decisions/
+tickets/
