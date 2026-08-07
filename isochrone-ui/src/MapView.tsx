@@ -128,10 +128,24 @@ type Area = {
   id: number;
   schema_name: string | null;
   status: string;
+  created_at: string;
   min_lat: number;
   min_lon: number;
   max_lat: number;
   max_lon: number;
+};
+
+// Intl does the pluralising and the localising; a hand-rolled "3 minutes ago"
+// would be a worse version of something already in the runtime.
+const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+const ago = (iso: string) => {
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  const [unit, per]: [Intl.RelativeTimeFormatUnit, number] =
+    s < 60 ? ["second", 1]
+    : s < 3600 ? ["minute", 60]
+    : s < 86400 ? ["hour", 3600]
+    : ["day", 86400];
+  return rtf.format(-Math.round(s / per), unit);
 };
 
 // Which areas this browser asked for. Not identity — someone else may have
@@ -240,6 +254,8 @@ export default function MapView() {
   const [searchState, setSearchState] =
     useState<"idle" | "loading" | "none" | "error">("idle");
   const [searchError, setSearchError] = useState("");
+  // Filled by the same 5s poll that draws the coverage overlay.
+  const [areas, setAreas] = useState<Area[]>([]);
 
   const closeHelp = () => {
     setHelp(false);
@@ -387,6 +403,9 @@ export default function MapView() {
         ]);
         const areas: Area[] = await res.json();
         const coverage = await covRes.json();
+        // The panel list rides the poll that already runs for the overlay —
+        // "without any new endpoint" (T-004), and without a second timer.
+        setAreas(areas);
         const group = areasRef.current;
         if (!group) return;
         group.clearLayers();
@@ -794,6 +813,37 @@ export default function MapView() {
 
   const kindLabel = (k: string) => k.replace(/_/g, " ");
 
+  // Only user-imported areas: the shipped city is seeded into the same table
+  // from its own ST_Extent, and "Berlin, added 2 years ago" is not evidence
+  // that anyone is using the importer.
+  // `failed` is excluded: this list exists to show the importer works, and a
+  // stranger's failed box is the opposite of that. Its schema is dropped
+  // anyway, so there is nothing to fly to.
+  const recent = areas
+    .filter((a) => a.schema_name?.startsWith("area_") && a.status !== "failed")
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))
+    .slice(0, 5);
+
+  // No names: nothing in the schema holds one, and reverse-geocoding on every
+  // render would be a Nominatim call per area per viewer. Centre coordinates
+  // are at least honest, and the button is the part that matters.
+  const coords = (a: Area) =>
+    `${((a.min_lat + a.max_lat) / 2).toFixed(3)}, ${(
+      (a.min_lon + a.max_lon) / 2
+    ).toFixed(3)}`;
+
+  const flyToArea = (a: Area) => {
+    const map = mapRef.current;
+    if (!map) return;
+    // fitBounds, not setView: the box is the thing being shown, and its size
+    // is the point — a fixed zoom would crop some and float above others.
+    map.fitBounds([
+      [a.min_lat, a.min_lon],
+      [a.max_lat, a.max_lon],
+    ]);
+    if (window.innerWidth <= 720) setPanelOpen(false);
+  };
+
   // Counting locally means the chips can show how many of each there are, and
   // switching filters costs nothing — the whole set is already here.
   const countFor = (g: Group) =>
@@ -972,6 +1022,34 @@ export default function MapView() {
               )}
             </ul>
           </section>
+
+          {recent.length > 0 && (
+            <section className="recent">
+              <h2>Recently added</h2>
+              <ul>
+                {recent.map((a) => (
+                  <li key={a.id}>
+                    <button
+                      onClick={() => flyToArea(a)}
+                      title="Show this area"
+                    >
+                      <span className="re-where">
+                        {a.status === "ready"
+                          ? coords(a)
+                          : `${coords(a)} · ${a.status}`}
+                      </span>
+                      <span className="re-when">
+                        {ago(a.created_at)}
+                        {mineRef.current.has(a.id) && (
+                          <span className="re-mine"> · yours</span>
+                        )}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
 
           <footer className="panel-foot">
             <div className="foot-title">Ask Claude about this map</div>

@@ -182,6 +182,22 @@ a { color: #2a63b5; }
 .pl-name { color: #23282d; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pl-kind { color: #8b929a; font-size: 11px; }
 
+/* Evidence that people add areas — the importer is otherwise invisible
+   unless you happen to pan somewhere dark. */
+.recent { border-top: 1px solid #eceef1; margin-top: 14px; padding-top: 12px; }
+.recent h2 { margin: 0 0 6px; font: 600 13px system-ui; }
+.recent ul { list-style: none; margin: 0; padding: 0; }
+.recent li + li { border-top: 1px solid #f2f4f6; }
+.recent button {
+  width: 100%; display: flex; justify-content: space-between; gap: 8px;
+  align-items: baseline; border: none; background: none; cursor: pointer;
+  text-align: left; padding: 6px 4px; font: 12px system-ui; color: #33383d;
+}
+.recent button:hover { background: #f7f9fb; }
+.re-where { font-variant-numeric: tabular-nums; }
+.re-when { color: #8b929a; font-size: 11px; white-space: nowrap; flex: none; }
+.re-mine { color: #7c4dff; }
+
 /* The install line used to wrap mid-word into a grey smear. Now it is a
    proper block: one scrollable line plus a copy button, so it never breaks. */
 .panel-foot {
