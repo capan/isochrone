@@ -113,6 +113,30 @@ a { color: #2a63b5; }
   color: #2a63b5; font: 12px system-ui; text-decoration: underline;
 }
 
+/* place search. type="search" for the browser's own clear button. */
+.search { display: flex; gap: 6px; margin-top: 10px; }
+.search input {
+  flex: 1; min-width: 0; border: 1px solid #dfe3e8; border-radius: 7px;
+  padding: 6px 9px; font: 13px system-ui;
+}
+.search button {
+  flex: none; border: 1px solid #d6dbe0; border-radius: 7px; background: #fff;
+  cursor: pointer; padding: 0 11px; font: 12px system-ui; color: #4a5158;
+}
+.search button:hover:not(:disabled) { background: #f1f3f5; }
+.search button:disabled { opacity: 0.5; cursor: default; }
+
+.results {
+  list-style: none; margin: 8px 0 0; padding: 0;
+  border: 1px solid #e6e9ec; border-radius: 7px; overflow: hidden;
+}
+.results li + li { border-top: 1px solid #f2f4f6; }
+.results button {
+  width: 100%; text-align: left; border: none; background: none;
+  cursor: pointer; padding: 7px 9px; font: 12px/1.4 system-ui; color: #33383d;
+}
+.results button:hover { background: #f7f9fb; }
+
 /* profile segmented control */
 .seg { display: flex; gap: 2px; margin: 12px 0 10px; background: #f1f3f5; padding: 3px; border-radius: 9px; }
 .seg button {

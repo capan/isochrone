@@ -80,6 +80,38 @@ for (const [lat, lon] of LOCS) {
   );
 }
 
+// Place search (T-006). No timing assertion for the one-request-a-second gate:
+// the responses are cached for a week, so only the very first run would be a
+// cache miss and busting the cache on purpose is exactly the traffic the
+// policy asks us not to send.
+const search = async (q) => {
+  const r = await fetch(`${API}/api/search?q=${encodeURIComponent(q)}`);
+  return { status: r.status, body: await r.json() };
+};
+
+{
+  const { body } = await search("Brandenburger Tor, Berlin");
+  const hit = body[0];
+  const inBerlin =
+    hit && Math.abs(hit.lat - 52.516) < 0.05 && Math.abs(hit.lon - 13.378) < 0.05;
+  if (!inBerlin) failed++;
+  console.log(
+    `${inBerlin ? "✅" : "❌"} search → ${hit ? `${hit.lat},${hit.lon} ${hit.name?.slice(0, 40)}` : "no result"}`
+  );
+
+  // A nonsense query is an empty list, not an error — the UI says so in prose.
+  const none = await search("zzzqqxnotaplaceanywhere");
+  const empty = none.status === 200 && Array.isArray(none.body) && !none.body.length;
+  if (!empty) failed++;
+  console.log(`${empty ? "✅" : "❌"} search no-result → ${none.status} ${JSON.stringify(none.body).slice(0, 40)}`);
+
+  // Too short to be worth a request upstream.
+  const short = await search("a");
+  const rejected = short.status === 400;
+  if (!rejected) failed++;
+  console.log(`${rejected ? "✅" : "❌"} search min length → ${short.status}`);
+}
+
 // T-011: amenities must say whether the area's POIs ever loaded. Berlin ships
 // with its own, so an empty list here would mean genuinely nothing in reach —
 // never "we don't know". `false` for a covered point is the bug this guards.
