@@ -22,3 +22,7 @@ __MACOSX/
 HANDOFF.md
 decisions/
 tickets/
+
+# agent orchestration
+CLAUDE.md
+.claude/
