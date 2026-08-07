@@ -16,9 +16,11 @@ await client.connect(
 
 const text = (r) => r.content.find((c) => c.type === "text").text;
 const call = (args) => client.callTool({ name: "reachable_area", arguments: args });
+const places = (args) => client.callTool({ name: "places_nearby", arguments: args });
 
 const { tools } = await client.listTools();
-assert(tools.some((t) => t.name === "reachable_area"), "tool registered");
+assert(tools.some((t) => t.name === "reachable_area"), "reachable_area registered");
+assert(tools.some((t) => t.name === "places_nearby"), "places_nearby registered");
 
 // plain summary
 const r1 = await call({ lat: 52.52, lon: 13.405 });
@@ -36,8 +38,10 @@ const r3 = await call({ lat: 52.52, lon: 13.405, minutes: 5, target: { lat: 52.4
 assert(/NOT reachable/.test(text(r3)), `target unreachable: ${text(r3)}`);
 
 // outside coverage → prose error, not empty success
-const r4 = await call({ lat: 48.8566, lon: 2.3522 });
-assert(r4.isError, "Paris should error");
+// Not Paris any more: anyone can import an area now, and somebody imported
+// Paris. Null Island is the only spot safe to assume nobody will ask for.
+const r4 = await call({ lat: 0, lon: 0 });
+assert(r4.isError, "Null Island should error");
 assert(/coverage/i.test(text(r4)), `coverage prose: ${text(r4)}`);
 
 // bike: a distinct profile with its own, lower minute cap
@@ -51,6 +55,31 @@ assert(/^10 min \(bike\)/.test(text(rb)), `bike default minutes: ${text(rb)}`);
 const rc = await call({ lat: 52.52, lon: 13.405, profile: "bike", minutes: 20 });
 assert(rc.isError, "over-cap bike should error");
 assert(/10 or less/.test(text(rc)), `cap message: ${text(rc)}`);
+
+// the summary now says what is reachable, not just how far
+assert(/Places within reach: .*food/.test(text(r1)), `place counts: ${text(r1)}`);
+
+// unfiltered: a breakdown and a prompt, never an arbitrary mixture
+const ru = await places({ lat: 52.52, lon: 13.405 });
+assert(!ru.isError, `unfiltered errored: ${text(ru)}`);
+assert(/food/.test(text(ru)), `breakdown by group: ${text(ru)}`);
+assert(/Ask which/.test(text(ru)), `invites a follow-up: ${text(ru)}`);
+assert(!/·/.test(text(ru)), "unfiltered must not list individual places");
+
+// places_nearby: named results with arrival times
+const rp = await places({ lat: 52.52, lon: 13.405, group: "food", limit: 5 });
+assert(!rp.isError, `places errored: ${text(rp)}`);
+assert(/min —/.test(text(rp)), `place lines: ${text(rp)}`);
+assert(text(rp).split("\n").length >= 3, "several places listed");
+
+// a specific kind narrows it
+const rk = await places({ lat: 52.52, lon: 13.405, kinds: ["pharmacy"], limit: 5 });
+assert(!rk.isError, `kind filter errored: ${text(rk)}`);
+assert(/pharmacy|No pharmacy/.test(text(rk)), `kind filter: ${text(rk)}`);
+
+// an unknown group explains itself instead of returning nothing
+const rg = await places({ lat: 52.52, lon: 13.405, group: "nonsense" });
+assert(rg.isError && /Unknown group/.test(text(rg)), `bad group: ${text(rg)}`);
 
 // cap enforced by schema before any fetch
 await assert.rejects(call({ lat: 52.52, lon: 13.405, minutes: 60 }).then((r) => {

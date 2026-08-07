@@ -1,8 +1,8 @@
 {
   "name": "isochrone-mcp",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "mcpName": "io.github.capan/isochrone",
-  "description": "MCP server for pedestrian isochrones: the street network reachable on foot (walk / stroller / wheelchair) in N minutes",
+  "description": "MCP server for reachability: streets and places you can reach on foot, by stroller, wheelchair or bike within a time budget",
   "license": "MIT",
   "author": "Huseyin Capan",
   "repository": {
