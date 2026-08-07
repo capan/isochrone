@@ -221,6 +221,9 @@ export default function MapView() {
   const loadPlacesRef = useRef<(lat: number, lon: number) => void>(() => {});
   const [copied, setCopied] = useState(false);
   const [helpFocus, setHelpFocus] = useState<"assistant" | undefined>(undefined);
+  // Only a deep link carries lat+lon, and only the MCP server hands those out,
+  // so their presence is the whole "came from an assistant" test.
+  const [arrival, setArrival] = useState(!isNaN(urlLat) && !isNaN(urlLon));
   const [help, setHelp] = useState(
     () => window.location.hash === "#how" || !seenHelp()
   );
@@ -589,6 +592,9 @@ export default function MapView() {
 
     map.on("click", (e: L.LeafletMouseEvent) => {
       setOffer(null);
+      // Clicking means they got the idea; it also keeps the banner from
+      // sharing the top strip with the import offer.
+      setArrival(false);
       debouncedUpdate(e.latlng.lat, e.latlng.lng);
     });
 
@@ -917,6 +923,30 @@ export default function MapView() {
           className="toast"
           style={{ display: "none" }}
         />
+
+        {arrival && !offer && (
+          <div className="floating arrival">
+            <span>
+              An AI assistant drew this with the isochrone MCP server.
+            </span>
+            <button
+              className="linkish"
+              onClick={() => {
+                setHelpFocus("assistant");
+                setHelp(true);
+              }}
+            >
+              what it can do
+            </button>
+            <button
+              className="dismiss"
+              aria-label="Dismiss"
+              onClick={() => setArrival(false)}
+            >
+              ×
+            </button>
+          </div>
+        )}
 
         {offer && (
           <div className="floating offer">

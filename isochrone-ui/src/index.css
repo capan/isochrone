@@ -204,6 +204,11 @@ a { color: #2a63b5; }
   display: flex; align-items: center; gap: 9px; font: 13px system-ui;
 }
 .offer { top: 12px; padding: 9px 13px; border-radius: 4px; }
+.arrival { top: 12px; padding: 7px 8px 7px 13px; border-radius: 20px; max-width: 92%; font-size: 12px; }
+.arrival .dismiss {
+  border: none; background: none; cursor: pointer; color: #868e96;
+  font-size: 16px; line-height: 1; padding: 0 5px;
+}
 .offer button { font: 13px system-ui; padding: 5px 10px; cursor: pointer; }
 .progress { bottom: 14px; padding: 7px 12px; border-radius: 20px; color: #33383d; font-size: 12px; }
 .toast {
