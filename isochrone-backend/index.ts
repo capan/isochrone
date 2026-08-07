@@ -806,17 +806,51 @@ const drainQueue = async () => {
 // A queued retry has nothing to wake it, so re-check periodically.
 setInterval(() => void drainQueue(), 30_000).unref?.();
 
-// Destinations worth searching for. The extract is three-quarters parking
-// bays, benches and waste baskets, so everything is stored and only this
-// subset is queryable — the list can change without re-importing anything.
-const AMENITY_KINDS = [
-  "restaurant", "cafe", "bar", "pub", "fast_food", "ice_cream",
-  "pharmacy", "doctors", "hospital", "clinic", "dentist",
-  "school", "kindergarten", "university", "library", "theatre", "cinema",
-  "bank", "atm", "post_office", "marketplace", "fuel", "playground",
-  "supermarket", "bakery", "butcher", "greengrocer", "convenience",
-  "clothes", "hairdresser", "books", "florist", "optician", "hardware",
+// Destinations worth searching for, grouped. Defined here and served to the
+// client so the two can't drift: the UI colours, filters and labels all come
+// from this list. The raw extract is three-quarters parking bays, benches and
+// waste baskets, so everything is stored and only these kinds are queryable.
+const PLACE_GROUPS = [
+  {
+    label: "food", icon: "\u{1F37D}", color: "#e8590c",
+    kinds: ["restaurant", "cafe", "bar", "pub", "fast_food", "ice_cream",
+            "bakery", "biergarten", "food_court"],
+  },
+  {
+    label: "shops", icon: "\u{1F6CD}", color: "#ae3ec9",
+    kinds: ["supermarket", "convenience", "butcher", "greengrocer", "clothes",
+            "books", "florist", "hardware", "optician", "department_store",
+            "mall", "kiosk", "hairdresser"],
+  },
+  {
+    label: "culture", icon: "\u{1F3DB}", color: "#c2255c",
+    // `memorial` is deliberately absent: Berlin maps every Stolperstein
+    // individually, and 475 brass pavement stones swamped a 15-minute walk.
+    // The rows are still stored — one word re-adds them.
+    kinds: ["museum", "artwork", "gallery", "attraction",
+            "monument", "castle", "ruins", "viewpoint", "theatre", "cinema",
+            "arts_centre"],
+  },
+  {
+    label: "health", icon: "\u{2695}", color: "#2f9e44",
+    kinds: ["pharmacy", "doctors", "dentist", "clinic", "hospital", "veterinary"],
+  },
+  {
+    label: "learning", icon: "\u{1F393}", color: "#0c8599",
+    kinds: ["school", "kindergarten", "university", "college", "library"],
+  },
+  {
+    label: "outdoors", icon: "\u{1F333}", color: "#74b816",
+    kinds: ["park", "playground", "garden", "pitch", "sports_centre",
+            "fitness_centre", "swimming_pool", "nature_reserve", "dog_park"],
+  },
+  {
+    label: "money", icon: "\u{1F4B6}", color: "#f59f00",
+    kinds: ["bank", "atm", "post_office", "bureau_de_change"],
+  },
 ];
+
+const AMENITY_KINDS = PLACE_GROUPS.flatMap((g) => g.kinds);
 
 // The reachable-edge set, as a CTE. Shared so the isochrone and the amenity
 // lookup can never disagree about what "reachable" means.
@@ -865,7 +899,11 @@ app.get("/api/amenities", async (req: any, res: any) => {
     .map((k) => k.trim())
     .filter((k) => AMENITY_KINDS.includes(k));
   const kinds = wanted.length ? wanted : AMENITY_KINDS;
-  const limit = Math.min(200, parseInt(req.query.limit ?? "60", 10) || 60);
+  // The whole set, not a page. A 25-min walk from Alexanderplatz — the worst
+  // realistic case — is 2,148 places: ~35KB gzipped, one query instead of one
+  // per page, and the client gets an exact total and free scrolling. The cap
+  // is only a safety valve.
+  const limit = Math.min(3000, parseInt(req.query.limit ?? "3000", 10) || 3000);
 
   const { schema } = await resolveSchema(lat, lon);
   const key = `poi:${schema}:${lat.toFixed(5)},${lon.toFixed(
@@ -934,8 +972,8 @@ app.get("/api/amenities", async (req: any, res: any) => {
   }
 });
 
-app.get("/api/amenity-kinds", (_, res) => {
-  res.json(AMENITY_KINDS);
+app.get("/api/place-groups", (_, res) => {
+  res.json(PLACE_GROUPS);
 });
 
 app.get("/api/isochrone", async (req: any, res: any) => {

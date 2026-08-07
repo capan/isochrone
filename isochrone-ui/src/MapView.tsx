@@ -104,6 +104,19 @@ const savedBasemap = (): BasemapKey => {
   return "dark";
 };
 
+// Groups (labels, icons, colours, and which kinds belong to each) are served
+// by /api/place-groups so the map, the list and the query can't disagree.
+type Group = { label: string; icon: string; color: string; kinds: string[] };
+
+type Place = {
+  kind: string;
+  category: string;
+  name: string | null;
+  lat: number;
+  lon: number;
+  minutes: number;
+};
+
 // Half-width of the box offered when someone clicks outside coverage: 2.5km
 // each way = a 5×5km area. The server buffers this by another 2.1km on every
 // side, so it actually imports ~85km² — keep MAX_AREA_KM2 above 25.
@@ -187,6 +200,25 @@ export default function MapView() {
   // effect still reads the ref, which never goes stale inside its closure
   const [profile, setProfile] = useState(initialProfile);
   const [caps, setCaps] = useState<Record<string, number>>({});
+  const [places, setPlaces] = useState<Place[]>([]);
+  const placesRef = useRef<Place[]>([]);
+  const [groups, setGroups] = useState<Group[]>([]);
+  // kind → group, so a row or a dot can be coloured without scanning
+  const groupOfRef = useRef<Record<string, Group>>({});
+  const [placesState, setPlacesState] = useState<"idle" | "loading" | "ok" | "empty">("idle");
+  const [kindFilter, setKindFilter] = useState<string | null>(null);
+  // The API returns every match; this is only how many rows are painted.
+  const [visible, setVisible] = useState(60);
+  const sentinelRef = useRef<HTMLLIElement | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  // desktop starts with the panel open; on mobile it is a collapsed sheet
+  const [panelOpen, setPanelOpen] = useState(
+    () => typeof window === "undefined" || window.innerWidth > 720
+  );
+  const placeLayerRef = useRef<L.LayerGroup | null>(null);
+  const placesGenRef = useRef(0);
+  const drawPlacesRef = useRef<(items: Place[]) => void>(() => {});
+  const loadPlacesRef = useRef<(lat: number, lon: number) => void>(() => {});
   const [help, setHelp] = useState(
     () => window.location.hash === "#how" || !seenHelp()
   );
@@ -275,6 +307,42 @@ export default function MapView() {
     new HelpControl({ position: "topleft" }).addTo(map);
 
     areasRef.current = L.layerGroup().addTo(map);
+    // Canvas, not SVG: a 25-minute walk in central Berlin is ~2,100 places,
+    // and that many individual SVG nodes makes panning crawl.
+    const placeRenderer = L.canvas({ padding: 0.3 });
+    placeLayerRef.current = L.layerGroup().addTo(map);
+
+    drawPlacesRef.current = (items: Place[]) => {
+      const g = placeLayerRef.current;
+      if (!g) return;
+      g.clearLayers();
+      for (const pl of items) {
+        L.circleMarker([pl.lat, pl.lon], {
+          radius: 4,
+          weight: 1.5,
+          color: "#fff",
+          fillColor: groupOfRef.current[pl.kind]?.color ?? "#f0a202",
+          fillOpacity: 1,
+          renderer: placeRenderer,
+        })
+          .bindTooltip(
+            `${pl.name ?? pl.kind.replace(/_/g, " ")} · ${pl.minutes} min`,
+            { direction: "top" }
+          )
+          .addTo(g);
+      }
+    };
+
+    fetch("/api/place-groups")
+      .then((r) => r.json())
+      .then((gs: Group[]) => {
+        setGroups(gs);
+        const byKind: Record<string, Group> = {};
+        for (const g of gs) for (const k of g.kinds) byKind[k] = g;
+        groupOfRef.current = byKind;
+        drawPlacesRef.current(placesRef.current);
+      })
+      .catch(() => {});
 
     // The caps live on the server; asking beats restating them here.
     fetch("/api/profiles")
@@ -405,6 +473,7 @@ export default function MapView() {
         map.removeLayer(isochroneRef.current);
         isochroneRef.current = null;
       }
+      placeLayerRef.current?.clearLayers();
     };
 
     const updateIsochrones = async (lat: number, lng: number) => {
@@ -493,6 +562,7 @@ export default function MapView() {
       if (gen !== drawGenRef.current) return;
       clearIsochrone();
       isochroneRef.current = L.layerGroup(layers).addTo(map);
+      if (layers.length) loadPlacesRef.current(lat, lng);
     };
     updateRef.current = updateIsochrones;
 
@@ -525,8 +595,59 @@ export default function MapView() {
       updateIsochrones(urlLat, urlLon);
     }
 
-    return () => clearInterval(areaTimer);
+    // The sidebar collapses and expands, and Leaflet caches container size.
+    const ro = new ResizeObserver(() => map.invalidateSize());
+    ro.observe(document.getElementById("map")!);
+
+    return () => {
+      clearInterval(areaTimer);
+      ro.disconnect();
+    };
   }, []);
+
+  // Amenities are a second request, so they get their own generation guard —
+  // same overtaking problem the isochrone had.
+  const loadPlaces = async (lat: number, lon: number, filter = kindFilter) => {
+    const gen = ++placesGenRef.current;
+    setPlacesState("loading");
+    setVisible(60);
+    void filter; // filtering happens client-side now; fetch every kind once
+    try {
+      const r = await fetch(
+        `/api/amenities?lat=${lat}&lon=${lon}&profile=${profileRef.current}` +
+          `&minutes=${Math.min(MAX_MINUTES, capsRef.current[profileRef.current] ?? MAX_MINUTES)}` +
+``
+      );
+      const d = await r.json();
+      if (gen !== placesGenRef.current) return;
+      if (!r.ok) {
+        setPlaces([]);
+        return setPlacesState("empty");
+      }
+      placesRef.current = d.items ?? [];
+      setPlaces(d.items ?? []);
+      setPlacesState((d.items ?? []).length ? "ok" : "empty");
+      drawPlacesRef.current(d.items ?? []);
+    } catch {
+      if (gen !== placesGenRef.current) return;
+      setPlaces([]);
+      setPlacesState("empty");
+    }
+  };
+  loadPlacesRef.current = loadPlaces;
+
+  const focusPlace = (pl: Place) => {
+    const map = mapRef.current;
+    if (!map) return;
+    map.setView([pl.lat, pl.lon], Math.max(map.getZoom(), 16));
+    L.popup({ closeButton: false, className: "place-popup" })
+      .setLatLng([pl.lat, pl.lon])
+      .setContent(
+        `<b>${pl.name ?? pl.kind.replace(/_/g, " ")}</b><br>${pl.minutes} min away`
+      )
+      .openOn(map);
+    if (window.innerWidth <= 720) setPanelOpen(false);
+  };
 
   const startImport = async () => {
     if (!offer) return;
@@ -594,225 +715,203 @@ export default function MapView() {
     }
   };
 
+  // Grow the rendered window when the end of the list scrolls into view.
+  // Everything is already in memory, so this costs no requests.
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el || visible >= places.length) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting) setVisible((v) => v + 60);
+      },
+      { root: scrollRef.current, rootMargin: "200px" }
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [visible, places.length]);
+
+  const kindLabel = (k: string) => k.replace(/_/g, " ");
+
+  // Counting locally means the chips can show how many of each there are, and
+  // switching filters costs nothing — the whole set is already here.
+  const countFor = (g: Group) =>
+    places.reduce((n, pl) => n + (g.kinds.includes(pl.kind) ? 1 : 0), 0);
+  const activeGroup = groups.find((g) => g.label === kindFilter);
+  const shown = activeGroup
+    ? places.filter((pl) => activeGroup.kinds.includes(pl.kind))
+    : places;
+
   return (
-    <>
-      <div
-        ref={toastRef}
-        style={{
-          display: "none",
-          position: "absolute",
-          top: 12,
-          left: "50%",
-          transform: "translateX(-50%)",
-          zIndex: 1100,
-          maxWidth: "80vw",
-          background: "#b3261e",
-          color: "#fff",
-          padding: "8px 14px",
-          borderRadius: 4,
-          font: "13px system-ui",
-          boxShadow: "0 2px 6px rgba(0,0,0,0.3)",
-        }}
-      />
-
-      {offer && (
-        <div
-          style={{
-            position: "absolute",
-            top: 12,
-            left: "50%",
-            transform: "translateX(-50%)",
-            zIndex: 1100,
-            background: "rgba(255,255,255,0.96)",
-            padding: "10px 14px",
-            borderRadius: 4,
-            font: "13px system-ui",
-            color: "#0b0b0b",
-            boxShadow: "0 2px 6px rgba(0,0,0,0.3)",
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-          }}
+    <div className="app">
+      <aside className={`panel${panelOpen ? " open" : ""}`}>
+        <button
+          className="sheet-handle"
+          onClick={() => setPanelOpen((o) => !o)}
+          aria-expanded={panelOpen}
         >
-          <span>Nothing imported here yet.</span>
-          <button
-            onClick={startImport}
-            style={{
-              font: "13px system-ui",
-              padding: "5px 10px",
-              cursor: "pointer",
-            }}
-          >
-            Import 5×5 km area
-          </button>
-        </div>
-      )}
+          <span />
+        </button>
 
-      {/* Progress lives out of the way, bottom-centre: imports run in a queue
-          on the server, so the map stays fully usable while they do — click
-          elsewhere, switch profile, or queue another area. */}
-      {Object.keys(jobs).length > 0 && (
-        <div
-          style={{
-            position: "absolute",
-            bottom: 14,
-            left: "50%",
-            transform: "translateX(-50%)",
-            zIndex: 1050,
-            background: "rgba(255,255,255,0.94)",
-            padding: "7px 12px",
-            borderRadius: 20,
-            font: "12px system-ui",
-            color: "#33383d",
-            boxShadow: "0 1px 5px rgba(0,0,0,0.25)",
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-          }}
-        >
-          <span className="import-pulse" />
-          {Object.keys(jobs).length === 1
-            ? Object.values(jobs)[0]
-            : `${Object.keys(jobs).length} imports running`}
-        </div>
-      )}
-
-      {/* Segmented control, not a dropdown: four options is few enough to show
-          at once, and the time budget differs per profile — worth seeing
-          before you pick, not after the legend changes under you. */}
-      <div
-        role="group"
-        aria-label="mobility profile"
-        style={{
-          position: "absolute",
-          top: 10,
-          right: 10,
-          zIndex: 1000,
-          display: "flex",
-          gap: 2,
-          padding: 3,
-          background: "rgba(255,255,255,0.94)",
-          borderRadius: 9,
-          boxShadow: "0 1px 5px rgba(0,0,0,0.28)",
-          font: "13px system-ui",
-        }}
-      >
-        {PROFILES.map((p) => {
-          const active = p === profile;
-          return (
-            <button
-              key={p}
-              aria-pressed={active}
-              title={caps[p] ? `${p} — up to ${caps[p]} min` : p}
-              onClick={() => {
-                profileRef.current = p;
-                setProfile(p);
-                redrawRef.current();
-              }}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 5,
-                border: "none",
-                borderRadius: 7,
-                cursor: "pointer",
-                padding: "6px 9px",
-                font: "inherit",
-                fontWeight: active ? 600 : 400,
-                lineHeight: 1.1,
-                // Light tint, not a dark fill: the bike and wheelchair emoji
-                // are natively blue and disappeared against a blue button, and
-                // whitening them via filter would flatten the stroller sign
-                // into a solid block.
-                color: active ? "#12447f" : "#33383d",
-                background: active ? "#dbe8fa" : "transparent",
-                boxShadow: active ? "inset 0 0 0 1px #9dc0ea" : "none",
-              }}
-            >
-              <span style={{ fontSize: 15 }} aria-hidden="true">
-                {PROFILE_ICONS[p]}
-              </span>
-              {/* label hidden on narrow screens by CSS, never on its own */}
-              <span className="profile-label">{p}</span>
+        <div className="panel-scroll" ref={scrollRef}>
+          <header className="panel-head">
+            <h1>Reachable</h1>
+            <button className="linkish" onClick={() => setHelp(true)}>
+              How it works
             </button>
-          );
-        })}
-      </div>
+          </header>
 
-      <div
-        style={{
-          position: "absolute",
-          bottom: 24,
-          right: 10,
-          zIndex: 1000,
-          background: "rgba(255,255,255,0.92)",
-          padding: "8px 10px",
-          borderRadius: 4,
-          font: "12px system-ui",
-          color: "#52514e",
-        }}
-      >
-        <div style={{ marginBottom: 4, color: "#0b0b0b" }}>travel time</div>
-        {/* flex:1 rather than a fixed 16px — the legend box is as wide as its
-            widest row, and a fixed ramp left a gap before the "15 min" label */}
-        <div style={{ display: "flex" }}>
-          {basemap.ramp.map((c) => (
-            <div key={c} style={{ flex: 1, height: 10, background: c }} />
-          ))}
-        </div>
-        <div style={{ display: "flex", justifyContent: "space-between" }}>
-          <span>0</span>
-          <span>{shownMinutes} min</span>
-        </div>
-        <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 5 }}>
-          <span
-            style={{
-              width: 13,
-              height: 8,
-              background: basemap.veil,
-              opacity: basemap.veilOpacity * 3, // swatch is tiny; make it readable
-            }}
-          />
-          not imported
-          <span
-            style={{ width: 13, height: 8, border: "2px solid #7c4dff" }}
-          />
-          yours
-          <span
-            style={{ width: 13, height: 8, border: "2px dashed #e08c00" }}
-          />
-          importing
-        </div>
-      </div>
+          <div className="seg" role="group" aria-label="mobility profile">
+            {PROFILES.map((p) => (
+              <button
+                key={p}
+                aria-pressed={p === profile}
+                title={caps[p] ? `${p} — up to ${caps[p]} min` : p}
+                onClick={() => {
+                  profileRef.current = p;
+                  setProfile(p);
+                  redrawRef.current();
+                }}
+              >
+                <span aria-hidden="true">{PROFILE_ICONS[p]}</span>
+                <span className="profile-label">{p}</span>
+              </button>
+            ))}
+          </div>
 
-      <div
-        style={{
-          position: "absolute",
-          bottom: 24,
-          left: 10,
-          zIndex: 1000,
-          background: "rgba(255,255,255,0.92)",
-          padding: "8px 10px",
-          borderRadius: 4,
-          font: "12px system-ui",
-          color: "#52514e",
-        }}
-      >
-        <div style={{ marginBottom: 4, color: "#0b0b0b" }}>
-          ask Claude about reachability — MCP server:
+          <div className="ramp">
+            <div className="ramp-bar">
+              {basemap.ramp.map((c) => (
+                <i key={c} style={{ background: c }} />
+              ))}
+            </div>
+            <div className="ramp-scale">
+              <span>0</span>
+              <span>{shownMinutes} min</span>
+            </div>
+          </div>
+
+          {!lastClickRef.current && (
+            <p className="hint">
+              Click the map to see what you can reach. Dark areas have no data
+              yet — click one to import it.
+            </p>
+          )}
+
+          <section className="places">
+            <div className="places-head">
+              <h2>Places within reach</h2>
+              {places.length > 0 && (
+                <span className="count">{shown.length.toLocaleString()}</span>
+              )}
+            </div>
+
+            <div className="chips">
+              {groups.map((g) => {
+                const n = countFor(g);
+                return (
+                  <button
+                    key={g.label}
+                    disabled={!n}
+                    aria-pressed={kindFilter === g.label}
+                    style={
+                      kindFilter === g.label
+                        ? { background: g.color, borderColor: g.color, color: "#fff" }
+                        : undefined
+                    }
+                    onClick={() => {
+                      const next = kindFilter === g.label ? null : g.label;
+                      setKindFilter(next);
+                      setVisible(60);
+                      const grp = groups.find((x) => x.label === next);
+                      drawPlacesRef.current(
+                        grp
+                          ? placesRef.current.filter((pl) => grp.kinds.includes(pl.kind))
+                          : placesRef.current
+                      );
+                    }}
+                  >
+                    <span aria-hidden="true">{g.icon}</span> {g.label}
+                    {n > 0 && <span className="chip-n">{n}</span>}
+                  </button>
+                );
+              })}
+            </div>
+
+            {placesState === "loading" && <p className="muted">Looking…</p>}
+            {placesState === "empty" && (
+              <p className="muted">Nothing of that kind within reach.</p>
+            )}
+            {placesState === "idle" && !places.length && (
+              <p className="muted">Pick a point on the map first.</p>
+            )}
+
+            <ul className="place-list">
+              {shown.slice(0, visible).map((pl, i) => (
+                <li key={`${pl.kind}-${pl.name}-${i}`}>
+                  <button
+                    onClick={() => focusPlace(pl)}
+                    title="Show on map"
+                  >
+                    <span className="pl-min">{pl.minutes}′</span>
+                    <span
+                      className="pl-dot"
+                      style={{
+                        background: groupOfRef.current[pl.kind]?.color ?? "#adb5bd",
+                      }}
+                      aria-hidden="true"
+                    />
+                    <span className="pl-body">
+                      <span className="pl-name">{pl.name || kindLabel(pl.kind)}</span>
+                      <span className="pl-kind">{kindLabel(pl.kind)}</span>
+                    </span>
+                  </button>
+                </li>
+              ))}
+              {visible < shown.length && (
+                <li ref={sentinelRef} className="loading-more">
+                  loading {Math.min(60, shown.length - visible)} more…
+                </li>
+              )}
+            </ul>
+          </section>
+
+          <footer className="panel-foot">
+            <span>ask Claude about reachability</span>
+            <code>claude mcp add isochrone -- npx -y isochrone-mcp</code>
+          </footer>
         </div>
-        <code style={{ userSelect: "all", font: "11px ui-monospace, monospace" }}>
-          claude mcp add isochrone -- npx -y isochrone-mcp
-        </code>
+      </aside>
+
+      <div className="map-wrap">
+        <div
+          ref={toastRef}
+          className="toast"
+          style={{ display: "none" }}
+        />
+
+        {offer && (
+          <div className="floating offer">
+            <span>Nothing imported here yet.</span>
+            <button onClick={startImport}>Import 5×5 km area</button>
+          </div>
+        )}
+
+        {Object.keys(jobs).length > 0 && (
+          <div className="floating progress">
+            <span className="import-pulse" />
+            {Object.keys(jobs).length === 1
+              ? Object.values(jobs)[0]
+              : `${Object.keys(jobs).length} imports running`}
+          </div>
+        )}
+
+        <div id="map" />
       </div>
 
       {help && <HelpPanel onClose={closeHelp} />}
-
-      <div id="map" style={{ height: "100vh" }} />
-    </>
+    </div>
   );
 }
-
 // Simple debounce utility
 function debounce(fn: (...args: any[]) => void, delay: number) {
   let timeout: ReturnType<typeof setTimeout>;
