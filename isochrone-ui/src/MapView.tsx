@@ -702,6 +702,9 @@ export default function MapView() {
     if (!map) return;
     setResults([]);
     setOffer(null);
+    // Same reasoning as the map click: acting on the map means the banner has
+    // done its job, and it shares the top strip with the import offer.
+    setArrival(false);
     map.setView([r.lat, r.lon], 14);
     lastClickRef.current = [r.lat, r.lon];
     updateRef.current(r.lat, r.lon);
