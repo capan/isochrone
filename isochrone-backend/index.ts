@@ -3,7 +3,7 @@ import express from "express";
 import { Pool } from "pg";
 import cors from "cors";
 import { createClient } from "redis";
-import rateLimit from "express-rate-limit";
+import rateLimit, { MemoryStore } from "express-rate-limit";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -435,17 +435,81 @@ app.get("/api/cache-stats", (_, res) => {
 
 // Importing is orders of magnitude more expensive than a query: Overpass is a
 // shared public resource and each area costs disk forever.
+// Per IP, not global: ten people each importing one area is fine and they all
+// get served — the queue orders them, it doesn't turn anyone away.
+const IMPORT_LIMIT = parseInt(process.env.IMPORT_LIMIT ?? "1", 10);
+
+// Shared by the rate limiter and the handler: a payload only costs quota if it
+// could actually start an import. Anything malformed or oversized must reach
+// the handler and be answered on its merits — being told "rate limited" when
+// the real problem is a 1° box is a maddening thing to debug.
+const parseBox = (body: any) => {
+  const nums = [body?.minLat, body?.minLon, body?.maxLat, body?.maxLon].map(Number);
+  if (nums.some((n) => !isFinite(n))) return { ok: false as const, why: "nan" };
+  const [s, w, n, e] = nums;
+  if (s >= n || w >= e) return { ok: false as const, why: "order" };
+  const midLat = (s + n) / 2;
+  const heightKm = (n - s) * 111.32;
+  const widthKm = (e - w) * 111.32 * Math.cos((midLat * Math.PI) / 180);
+  const areaKm2 = heightKm * widthKm;
+  return {
+    ok: areaKm2 <= MAX_AREA_KM2,
+    why: "size", s, w, n, e, midLat, heightKm, widthKm, areaKm2,
+  };
+};
+
+// Own store and key function so a failed import can hand the slot back. With
+// one import an hour, spending it on an area that then fails to build would
+// otherwise lock someone out for an hour having got nothing.
+const importStore = new MemoryStore();
+const importKey = (req: any) => String(req.ip ?? "unknown");
+const pendingKey = new Map<number, string>();
+
+const refundImport = (areaId: number) => {
+  const key = pendingKey.get(areaId);
+  if (!key) return;
+  pendingKey.delete(areaId);
+  Promise.resolve(importStore.decrement(key)).catch(() => {});
+  console.log(`↩︎ refunded import slot for a failed area`);
+};
+
 const importLimiter = rateLimit({
   windowMs: 60 * 60_000,
-  limit: parseInt(process.env.IMPORT_LIMIT ?? "10", 10),
+  limit: IMPORT_LIMIT,
+  store: importStore,
+  keyGenerator: importKey,
   standardHeaders: "draft-7",
   legacyHeaders: false,
-  // Only real imports should cost quota. Without this a mistyped box or a
-  // repeat request for an area that already exists burns the same budget as
-  // an actual osm2pgrouting run — the smoke check alone spends three.
+  // Only real imports should cost quota. Without this a mistyped box burns the
+  // same budget as an actual osm2pgrouting run.
   skipFailedRequests: true,
+  // Nor should clicking somewhere already covered. That was tolerable at ten
+  // an hour; at three, exploring a city you have already imported would lock
+  // you out. The lookup is one indexed query, and the handler reuses it.
+  skip: async (req: any) => {
+    // Malformed or too big: let the handler explain the actual problem.
+    const box = parseBox(req.body);
+    if (!box.ok || box.s === undefined) return true;
+    try {
+      const { s, w, n, e } = box;
+      const r = await pool.query(
+        `SELECT id, schema_name FROM public.areas
+          WHERE status = 'ready'
+            AND ST_Contains(bbox, ST_MakeEnvelope($1, $2, $3, $4, 4326))
+          LIMIT 1`,
+        [w, s, e, n]
+      );
+      if (r.rows[0]) {
+        req.existingArea = r.rows[0];
+        return true;
+      }
+    } catch {
+      /* if the check fails, charge the request rather than let it through */
+    }
+    return false;
+  },
   message: {
-    error: "Import limit reached (10/hour). Try again later.",
+    error: `Import limit reached (${IMPORT_LIMIT}/hour). Try again later.`,
   },
 });
 
@@ -475,13 +539,17 @@ app.post("/api/areas", importLimiter, async (req: any, res: any) => {
   }
 
   // Already covered? Serving an existing area beats importing a duplicate.
-  const existing = await pool.query(
-    `SELECT id, schema_name FROM public.areas
-      WHERE status = 'ready'
-        AND ST_Contains(bbox, ST_MakeEnvelope($1, $2, $3, $4, 4326))
-      LIMIT 1`,
-    [w, s, e, n]
-  );
+  // The rate limiter already ran this lookup to decide whether to charge the
+  // request; reuse its answer rather than asking twice.
+  const existing = req.existingArea
+    ? { rows: [req.existingArea] }
+    : await pool.query(
+        `SELECT id, schema_name FROM public.areas
+          WHERE status = 'ready'
+            AND ST_Contains(bbox, ST_MakeEnvelope($1, $2, $3, $4, 4326))
+          LIMIT 1`,
+        [w, s, e, n]
+      );
   if (existing.rows[0]) {
     // id included so the client can claim it locally even when it was
     // somebody else's import that already covered this spot.
@@ -531,6 +599,7 @@ app.post("/api/areas", importLimiter, async (req: any, res: any) => {
     Math.round((heightKm + bufferKm) * (widthKm + bufferKm))
   );
 
+  pendingKey.set(id, importKey(req));
   drainQueue(); // fire and forget; the worker serializes
   res.status(202).json({
     id,
@@ -753,6 +822,7 @@ const runImport = async (areaId: number) => {
         Date.now() - start
       }ms — ${Math.round(await importedMb())}MB of ${MAX_IMPORT_MB}MB used`
     );
+    pendingKey.delete(areaId);
     // Measured, not predicted. The area just imported sorts newest, so it is
     // never its own victim.
     await evictToFit();
@@ -775,6 +845,8 @@ const runImport = async (areaId: number) => {
     if (retryable) {
       console.log(`↻ ${schemaName} will retry (attempt ${attempts + 2})`);
       await sleep(RETRY_PAUSE_MS);
+    } else {
+      refundImport(areaId);
     }
   } finally {
     fs.rmSync(osmFile, { force: true });
