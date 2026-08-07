@@ -136,6 +136,13 @@ const MAIN_COMPONENT_SQL = process.env.MAIN_COMPONENT_SQL ??
   path.join(__dirname, "../scripts/main_component.sql");
 const OVERPASS_URL =
   process.env.OVERPASS_URL ?? "https://overpass-api.de/api/interpreter";
+const NOMINATIM_URL =
+  process.env.NOMINATIM_URL ?? "https://nominatim.openstreetmap.org/search";
+
+// Both OSM services want an identifying agent in their usage policy, and
+// Overpass's Apache goes further: it answers Node's default UA ("node") with a
+// 406 before the query is ever parsed.
+const USER_AGENT = "isochrone/0.1 (+https://iso.huseyincapan.dev)";
 
 // The UI offers a 5×5km box, so this has to sit above 25. Remember the buffer
 // roughly triples it: 25km² requested imports ~85km².
@@ -422,6 +429,56 @@ app.get("/api/profiles", (_, res) => {
   );
 });
 
+// Geocoding for the search box. Proxied rather than called from the browser:
+// Nominatim's policy wants an identifying User-Agent (a page cannot set one),
+// caps callers at one request a second, and asks that repeats be cached — all
+// three are properties of the whole site, not of one visitor's tab.
+//
+// One request a second, enforced by chaining rather than by comparing against
+// a "last call" timestamp: two concurrent visitors read the same timestamp and
+// fire together. Each caller waits for the previous link and appends its own
+// 1s gap, so turns start exactly a second apart however long a fetch takes.
+let geocodeGate: Promise<unknown> = Promise.resolve();
+const geocodeSlot = () => {
+  const mine = geocodeGate;
+  geocodeGate = mine.then(() => sleep(1000));
+  return mine;
+};
+
+app.get("/api/search", async (req: any, res: any) => {
+  const q = String(req.query.q ?? "").trim().slice(0, 120);
+  if (q.length < 2)
+    return res.status(400).json({ error: "Type at least two characters." });
+
+  // A week: place names do not move, and this is the cache their policy asks
+  // for. Misses are cached too — a typo repeated is still a request saved.
+  const key = `geocode:${q.toLowerCase()}`;
+  const cached = await cacheGet(key);
+  if (cached) return res.json(JSON.parse(cached));
+
+  await geocodeSlot();
+  try {
+    const r = await fetch(
+      `${NOMINATIM_URL}?format=jsonv2&limit=5&q=${encodeURIComponent(q)}`,
+      { headers: { "User-Agent": USER_AGENT }, signal: AbortSignal.timeout(10_000) }
+    );
+    if (!r.ok) {
+      return res.status(503).json({
+        error: "Place search is busy right now. Try again in a moment.",
+      });
+    }
+    const results = ((await r.json()) as any[]).map((p) => ({
+      name: p.display_name as string,
+      lat: parseFloat(p.lat),
+      lon: parseFloat(p.lon),
+    }));
+    await cacheSet(key, JSON.stringify(results), 60 * 60 * 24 * 7);
+    res.json(results);
+  } catch {
+    res.status(503).json({ error: "Could not reach the place search service." });
+  }
+});
+
 app.get("/api/cache-stats", (_, res) => {
   res.json({
     cacheHits,
@@ -644,7 +701,7 @@ const runImport = async (areaId: number) => {
       // Node's default UA ("node") is rejected by Overpass's Apache with a 406
       // before the query is ever parsed; their usage policy wants an
       // identifying agent anyway.
-      headers: { "User-Agent": "isochrone/0.1 (+https://iso.huseyincapan.dev)" },
+      headers: { "User-Agent": USER_AGENT },
       body: new URLSearchParams({ data: query }),
       signal: AbortSignal.timeout(120_000),
     });
@@ -764,7 +821,7 @@ const runImport = async (areaId: number) => {
         await sleep(attempt === 0 ? 3000 : 15000);
         pr = await fetch(OVERPASS_URL, {
           method: "POST",
-          headers: { "User-Agent": "isochrone/0.1 (+https://iso.huseyincapan.dev)" },
+          headers: { "User-Agent": USER_AGENT },
           body: new URLSearchParams({ data: poiQuery }),
           signal: AbortSignal.timeout(150_000),
         });

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import L from "leaflet";
 import HelpPanel from "./HelpPanel";
 
@@ -107,6 +107,8 @@ const savedBasemap = (): BasemapKey => {
 // Groups (labels, icons, colours, and which kinds belong to each) are served
 // by /api/place-groups so the map, the list and the query can't disagree.
 type Group = { label: string; icon: string; color: string; kinds: string[] };
+
+type Geo = { name: string; lat: number; lon: number };
 
 type Place = {
   kind: string;
@@ -224,6 +226,13 @@ export default function MapView() {
   const [help, setHelp] = useState(
     () => window.location.hash === "#how" || !seenHelp()
   );
+  // Geocoding goes through /api/search, not straight to Nominatim: their
+  // policy wants an identifying User-Agent, which a browser cannot send.
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<Geo[]>([]);
+  const [searchState, setSearchState] =
+    useState<"idle" | "loading" | "none" | "error">("idle");
+  const [searchError, setSearchError] = useState("");
 
   const closeHelp = () => {
     setHelp(false);
@@ -652,6 +661,41 @@ export default function MapView() {
     if (window.innerWidth <= 720) setPanelOpen(false);
   };
 
+  const runSearch = async (e: FormEvent) => {
+    e.preventDefault();
+    const q = query.trim();
+    if (q.length < 2) return;
+    setSearchState("loading");
+    setResults([]);
+    try {
+      const r = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+      const d = await r.json();
+      if (!r.ok) {
+        setSearchError(d.error ?? `Search failed (${r.status})`);
+        return setSearchState("error");
+      }
+      setResults(d);
+      setSearchState(d.length ? "idle" : "none");
+    } catch {
+      setSearchError("Could not reach the place search service.");
+      setSearchState("error");
+    }
+  };
+
+  // Same landing as a deep link, and deliberately the same code path as a
+  // click: if the result is outside coverage, updateIsochrones turns that into
+  // the import offer on its own.
+  const goTo = (r: Geo) => {
+    const map = mapRef.current;
+    if (!map) return;
+    setResults([]);
+    setOffer(null);
+    map.setView([r.lat, r.lon], 14);
+    lastClickRef.current = [r.lat, r.lon];
+    updateRef.current(r.lat, r.lon);
+    if (window.innerWidth <= 720) setPanelOpen(false);
+  };
+
   const startImport = async () => {
     if (!offer) return;
     const { lat, lon } = offer;
@@ -762,6 +806,36 @@ export default function MapView() {
               How it works
             </button>
           </header>
+
+          <form className="search" onSubmit={runSearch}>
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search for a place…"
+              aria-label="Search for a place"
+            />
+            <button type="submit" disabled={searchState === "loading"}>
+              {searchState === "loading" ? "…" : "Go"}
+            </button>
+          </form>
+
+          {searchState === "none" && (
+            <p className="muted">
+              No place by that name. Try adding a city or country.
+            </p>
+          )}
+          {searchState === "error" && <p className="muted">{searchError}</p>}
+
+          {results.length > 0 && (
+            <ul className="results">
+              {results.map((r) => (
+                <li key={`${r.lat},${r.lon}`}>
+                  <button onClick={() => goTo(r)}>{r.name}</button>
+                </li>
+              ))}
+            </ul>
+          )}
 
           <div className="seg" role="group" aria-label="mobility profile">
             {PROFILES.map((p) => (
