@@ -219,12 +219,15 @@ export default function MapView() {
   const placesGenRef = useRef(0);
   const drawPlacesRef = useRef<(items: Place[]) => void>(() => {});
   const loadPlacesRef = useRef<(lat: number, lon: number) => void>(() => {});
+  const [copied, setCopied] = useState(false);
+  const [helpFocus, setHelpFocus] = useState<"assistant" | undefined>(undefined);
   const [help, setHelp] = useState(
     () => window.location.hash === "#how" || !seenHelp()
   );
 
   const closeHelp = () => {
     setHelp(false);
+    setHelpFocus(undefined);
     try {
       localStorage.setItem(SEEN_HELP_KEY, "1");
     } catch {
@@ -453,7 +456,7 @@ export default function MapView() {
             interactive: false,
           })
             .bindTooltip(
-              `${a.status === "importing" ? "importing" : "queued"} — ${
+              `${a.status === "importing" ? "importing" : "queued"}: ${
                 mine ? "your request" : "someone else"
               }`,
               { permanent: true, direction: "center", className: "area-label" }
@@ -550,13 +553,13 @@ export default function MapView() {
 
         if (!features.length) {
           showToast(
-            `No reachable streets here for "${profileRef.current}" — stairs or surfaces may block this origin`
+            `No reachable streets here for "${profileRef.current}". Stairs or rough surfaces may block this spot.`
           );
         }
       } catch (err) {
         if (gen !== drawGenRef.current) return;
         console.error("Isochrone network fetch failed", err);
-        showToast("Could not reach the isochrone service — try again in a moment");
+        showToast("Could not reach the isochrone service. Try again in a moment.");
       }
 
       if (gen !== drawGenRef.current) return;
@@ -706,7 +709,7 @@ export default function MapView() {
           id,
           s.status === "importing"
             ? "importing streets…"
-            : `queued — ${s.ahead} ahead`
+            : `queued, ${s.ahead} ahead`
         );
       }
     } catch {
@@ -765,7 +768,7 @@ export default function MapView() {
               <button
                 key={p}
                 aria-pressed={p === profile}
-                title={caps[p] ? `${p} — up to ${caps[p]} min` : p}
+                title={caps[p] ? `${p}: up to ${caps[p]} min` : p}
                 onClick={() => {
                   profileRef.current = p;
                   setProfile(p);
@@ -792,8 +795,8 @@ export default function MapView() {
 
           {!lastClickRef.current && (
             <p className="hint">
-              Click the map to see what you can reach. Dark areas have no data
-              yet — click one to import it.
+              Click the map to see what you can reach. Dark areas have no
+              data yet. Click one to import it.
             </p>
           )}
 
@@ -876,8 +879,34 @@ export default function MapView() {
           </section>
 
           <footer className="panel-foot">
-            <span>ask Claude about reachability</span>
-            <code>claude mcp add isochrone -- npx -y isochrone-mcp</code>
+            <div className="foot-title">Ask Claude about this map</div>
+            <div className="foot-cmd">
+              <code>claude mcp add isochrone -- npx -y isochrone-mcp</code>
+              <button
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(
+                      "claude mcp add isochrone -- npx -y isochrone-mcp"
+                    );
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 1600);
+                  } catch {
+                    /* no clipboard permission; the text is selectable anyway */
+                  }
+                }}
+              >
+                {copied ? "copied" : "copy"}
+              </button>
+            </div>
+            <button
+              className="linkish"
+              onClick={() => {
+                setHelpFocus("assistant");
+                setHelp(true);
+              }}
+            >
+              see what you can ask
+            </button>
           </footer>
         </div>
       </aside>
@@ -908,7 +937,7 @@ export default function MapView() {
         <div id="map" />
       </div>
 
-      {help && <HelpPanel onClose={closeHelp} />}
+      {help && <HelpPanel onClose={closeHelp} focus={helpFocus} />}
     </div>
   );
 }

@@ -1,3 +1,6 @@
+import { useEffect, useRef, useState } from "react";
+import ChatDemo from "./ChatDemo";
+
 // Onboarding, in the app rather than the README: nothing on the map tells a
 // first-time visitor that the dark region is data they can ask for.
 //
@@ -31,11 +34,26 @@ const Row = ({
 const Section = ({
   title,
   children,
+  onToggle,
+  defaultOpen,
 }: {
   title: string;
   children: React.ReactNode;
-}) => (
-  <details style={{ borderTop: "1px solid #eceef1", padding: "8px 0 0" }}>
+  onToggle?: (open: boolean) => void;
+  defaultOpen?: boolean;
+}) => {
+  const ref = useRef<HTMLDetailsElement | null>(null);
+  // A section opened by a deep link is usually below the fold.
+  useEffect(() => {
+    if (defaultOpen) ref.current?.scrollIntoView({ block: "nearest" });
+  }, [defaultOpen]);
+  return (
+  <details
+    ref={ref}
+    open={defaultOpen}
+    style={{ borderTop: "1px solid #eceef1", padding: "8px 0 0" }}
+    onToggle={(e) => onToggle?.((e.currentTarget as HTMLDetailsElement).open)}
+  >
     <summary
       style={{
         cursor: "pointer",
@@ -48,9 +66,19 @@ const Section = ({
     </summary>
     <div style={{ color: "#5b6470", paddingBottom: 6 }}>{children}</div>
   </details>
-);
+  );
+};
 
-export default function HelpPanel({ onClose }: { onClose: () => void }) {
+export default function HelpPanel({
+  onClose,
+  focus,
+}: {
+  onClose: () => void;
+  focus?: "assistant";
+}) {
+  // Opened from "see what you can ask": expand that section and let the
+  // transcript start immediately, rather than making people hunt for it.
+  const [assistantOpen, setAssistantOpen] = useState(focus === "assistant");
   return (
     <div
       onClick={onClose}
@@ -115,8 +143,8 @@ export default function HelpPanel({ onClose }: { onClose: () => void }) {
             Click the lit part of the map to see what you can reach from there.
           </li>
           <li style={{ marginBottom: 5 }}>
-            Switch profile, top right. Steps block strollers and wheelchairs;
-            cycle paths are used only by the bike.
+            Switch profile, top right. Steps block strollers and wheelchairs.
+            Cycle paths are used only by the bike.
           </li>
           <li>
             Dark areas have no data yet. Click one to import it, about 5×5 km
@@ -170,10 +198,22 @@ export default function HelpPanel({ onClose }: { onClose: () => void }) {
           </ul>
         </Section>
 
-        <Section title="Ask an AI assistant">
-          <p style={{ margin: "0 0 6px" }}>
-            An MCP server lets Claude answer questions about this map:
+        <Section
+          title="Ask an AI assistant"
+          onToggle={setAssistantOpen}
+          defaultOpen={focus === "assistant"}
+        >
+          {/* The install command alone tells a visitor nothing about what the
+              server does. The questions are the feature; the command is how
+              you get it. */}
+          <p style={{ margin: "0 0 8px" }}>
+            An MCP server lets Claude answer questions about this map in words:
           </p>
+          <ChatDemo active={assistantOpen} />
+          <p style={{ margin: "9px 0 6px" }}>
+            It reads the same data as this map, and links back to it:
+          </p>
+
           <code
             style={{
               display: "block",

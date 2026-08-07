@@ -158,8 +158,44 @@ a { color: #2a63b5; }
 .pl-name { color: #23282d; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pl-kind { color: #8b929a; font-size: 11px; }
 
-.panel-foot { margin-top: 16px; padding-top: 10px; border-top: 1px solid #eceef1; color: #8b929a; font-size: 11px; }
-.panel-foot code { display: block; margin-top: 4px; user-select: all; font: 10.5px ui-monospace, monospace; color: #4a5158; }
+/* The install line used to wrap mid-word into a grey smear. Now it is a
+   proper block: one scrollable line plus a copy button, so it never breaks. */
+.panel-foot {
+  margin-top: 18px;
+  padding: 10px 11px;
+  border: 1px solid #e6e9ec;
+  border-radius: 8px;
+  background: #fafbfc;
+}
+.foot-title { font: 600 12px system-ui; color: #33383d; margin-bottom: 7px; }
+.foot-cmd { display: flex; align-items: stretch; gap: 6px; }
+.foot-cmd code {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  background: #fff;
+  border: 1px solid #e6e9ec;
+  border-radius: 5px;
+  padding: 5px 7px;
+  font: 10.5px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #4a5158;
+  user-select: all;
+}
+.foot-cmd code::-webkit-scrollbar { height: 4px; }
+.foot-cmd code::-webkit-scrollbar-thumb { background: #d6dbe0; border-radius: 2px; }
+.foot-cmd button {
+  flex: none;
+  border: 1px solid #d6dbe0;
+  border-radius: 5px;
+  background: #fff;
+  cursor: pointer;
+  padding: 0 9px;
+  font: 11px system-ui;
+  color: #4a5158;
+}
+.foot-cmd button:hover { background: #f1f3f5; }
+.panel-foot .linkish { margin-top: 8px; font-size: 11.5px; }
 
 /* floating bits that stay over the map */
 .floating {
@@ -222,3 +258,6 @@ a { color: #2a63b5; }
   width: 8px; height: 8px; border-radius: 50%;
   flex: none; align-self: center;
 }
+
+@keyframes chat-blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+.chat-cursor { animation: chat-blink 1s step-end infinite; }
