@@ -207,7 +207,11 @@ export default function MapView() {
   const [groups, setGroups] = useState<Group[]>([]);
   // kind → group, so a row or a dot can be coloured without scanning
   const groupOfRef = useRef<Record<string, Group>>({});
-  const [placesState, setPlacesState] = useState<"idle" | "loading" | "ok" | "empty">("idle");
+  // "pending" is not "empty": the area imported, but its amenities never
+  // arrived from Overpass and a sweep is still retrying them. Saying "nothing
+  // within reach" there is a confident wrong answer (T-011).
+  const [placesState, setPlacesState] =
+    useState<"idle" | "loading" | "ok" | "empty" | "pending">("idle");
   const [kindFilter, setKindFilter] = useState<string | null>(null);
   // The API returns every match; this is only how many rows are painted.
   const [visible, setVisible] = useState(60);
@@ -638,7 +642,9 @@ export default function MapView() {
       }
       placesRef.current = d.items ?? [];
       setPlaces(d.items ?? []);
-      setPlacesState((d.items ?? []).length ? "ok" : "empty");
+      setPlacesState(
+        (d.items ?? []).length ? "ok" : d.poisLoaded === false ? "pending" : "empty"
+      );
       drawPlacesRef.current(d.items ?? []);
     } catch {
       if (gen !== placesGenRef.current) return;
@@ -917,6 +923,12 @@ export default function MapView() {
             {placesState === "loading" && <p className="muted">Looking…</p>}
             {placesState === "empty" && (
               <p className="muted">Nothing of that kind within reach.</p>
+            )}
+            {placesState === "pending" && (
+              <p className="muted">
+                Streets are imported here, but the amenities haven't arrived
+                yet. They are still being fetched — check back shortly.
+              </p>
             )}
             {placesState === "idle" && !places.length && (
               <p className="muted">Pick a point on the map first.</p>

@@ -227,6 +227,10 @@ const ensureAreasTable = async () => {
     ALTER TABLE public.areas ADD COLUMN IF NOT EXISTS error text;
     ALTER TABLE public.areas ADD COLUMN IF NOT EXISTS attempts int NOT NULL DEFAULT 0;
     ALTER TABLE public.areas ADD COLUMN IF NOT EXISTS last_used_at timestamptz;
+    -- NULL = the POI fetch never succeeded for this area. A *successful* fetch
+    -- stamps it even when it returns nothing, which is the only way to tell a
+    -- genuinely amenity-free rural box from one whose fetch failed.
+    ALTER TABLE public.areas ADD COLUMN IF NOT EXISTS pois_at timestamptz;
     CREATE INDEX IF NOT EXISTS idx_areas_bbox ON public.areas USING GIST (bbox);
   `);
   // The shipped city is a schema, not an imported area. Give it a row so the
@@ -245,6 +249,29 @@ const ensureAreasTable = async () => {
     .catch((err) =>
       console.log(`ℹ️ no ${DEFAULT_SCHEMA} schema to register:`, err.message)
     );
+
+  // The shipped city's POIs came from its own extract, not from Overpass, so
+  // stamp it loaded — otherwise the backfill sweep would try to re-fetch a
+  // whole city's amenities through the public API, one bbox the size of Berlin.
+  await pool.query(
+    `UPDATE public.areas SET pois_at = now()
+      WHERE schema_name = $1 AND pois_at IS NULL`,
+    [DEFAULT_SCHEMA]
+  );
+
+  // Every area imported before pois_at existed reads as "never loaded", and
+  // most of them loaded fine. Re-fetching them all would be a few thousand
+  // needless Overpass calls for rows already sitting in public.pois — so take
+  // the evidence that is already here and only sweep what it can't vouch for.
+  const stamped = await pool.query(
+    `UPDATE public.areas a SET pois_at = a.created_at
+      WHERE a.pois_at IS NULL
+        AND EXISTS (SELECT 1 FROM public.pois p WHERE p.geom && a.bbox)
+     RETURNING id`
+  );
+  if (stamped.rowCount) {
+    console.log(`🍽️ ${stamped.rowCount} area(s) already had POIs; marked loaded`);
+  }
 
   // A crash mid-import leaves a row claiming 'importing' forever, and its
   // schema half-built; re-queue it so the worker redoes it cleanly.
@@ -265,7 +292,7 @@ const ensureAreasTable = async () => {
 const resolveSchema = async (lat: number, lon: number) => {
   const r = await pool.query(
     `WITH pick AS (
-       SELECT id, schema_name FROM public.areas
+       SELECT id, schema_name, pois_at FROM public.areas
         WHERE status = 'ready'
           AND ST_Contains(bbox, ST_SetSRID(ST_MakePoint($1, $2), 4326))
         ORDER BY ST_Area(bbox) ASC
@@ -275,7 +302,7 @@ const resolveSchema = async (lat: number, lon: number) => {
         WHERE id = (SELECT id FROM pick)
           AND (last_used_at IS NULL OR last_used_at < now() - interval '10 minutes')
      )
-     SELECT schema_name FROM pick`,
+     SELECT schema_name, pois_at IS NOT NULL AS pois_loaded FROM pick`,
     [lon, lat]
   );
   // `matched` distinguishes "no area covers this point" from "an area covers
@@ -284,6 +311,8 @@ const resolveSchema = async (lat: number, lon: number) => {
   return {
     schema: (r.rows[0]?.schema_name as string) ?? DEFAULT_SCHEMA,
     matched: Boolean(r.rows[0]),
+    // No row means we fell back to the shipped city, whose POIs came with it.
+    poisLoaded: r.rows[0] ? (r.rows[0].pois_loaded as boolean) : true,
   };
 };
 
@@ -667,6 +696,77 @@ app.post("/api/areas", importLimiter, async (req: any, res: any) => {
   });
 });
 
+// POIs live in one global table, independent of the routing schemas, so this
+// is additive: it can run during an import or long afterwards, and running it
+// twice costs nothing (ON CONFLICT DO NOTHING on the OSM id).
+//
+// `out center` gives ways a point without us assembling their geometry, and
+// `nwr` is one statement rather than four selectors. The pause before asking
+// is not politeness padding: when this follows the graph fetch of the same
+// import, firing immediately earned a 504 every time.
+//
+// Returns true only if Overpass actually answered. Stamping pois_at on the way
+// out — even for zero rows — is what lets a genuinely amenity-free rural box
+// be told apart from one whose fetch failed.
+const loadPois = async (
+  areaId: number,
+  label: string,
+  s: number, w: number, n: number, e: number
+) => {
+  try {
+    const poiQuery =
+      `[out:json][timeout:120];(nwr["amenity"](${s},${w},${n},${e});` +
+      `nwr["shop"](${s},${w},${n},${e}););out center tags;`;
+    let pr: Response | undefined;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await sleep(attempt === 0 ? 3000 : 15000);
+      pr = await fetch(OVERPASS_URL, {
+        method: "POST",
+        headers: { "User-Agent": USER_AGENT },
+        body: new URLSearchParams({ data: poiQuery }),
+        signal: AbortSignal.timeout(150_000),
+      });
+      if (pr.ok) break;
+      console.log(`↻ ${label}: POI fetch got ${pr.status}, retrying`);
+    }
+    if (!pr?.ok) throw new Error(`Overpass ${pr?.status}`);
+    const els = (await pr.json()).elements ?? [];
+    const rows = els
+      .map((el: any) => {
+        const y = el.lat ?? el.center?.lat;
+        const x = el.lon ?? el.center?.lon;
+        const cat = el.tags?.amenity ? "amenity" : el.tags?.shop ? "shop" : null;
+        if (y == null || x == null || !cat) return null;
+        return [el.type[0], el.id, cat, el.tags[cat], el.tags.name ?? null, x, y];
+      })
+      .filter(Boolean);
+    for (let i = 0; i < rows.length; i += 1000) {
+      const chunk = rows.slice(i, i + 1000);
+      const values = chunk
+        .map((_: unknown, j: number) => {
+          const b = j * 7;
+          return `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},ST_SetSRID(ST_MakePoint($${b + 6},$${b + 7}),4326))`;
+        })
+        .join(",");
+      await pool.query(
+        `INSERT INTO public.pois (osm_type, osm_id, category, kind, name, geom)
+         VALUES ${values} ON CONFLICT DO NOTHING`,
+        chunk.flat()
+      );
+    }
+    await pool.query(`UPDATE public.areas SET pois_at = now() WHERE id = $1`, [
+      areaId,
+    ]);
+    console.log(`🍽️ ${label}: ${rows.length} POIs`);
+    return true;
+  } catch (err) {
+    // pois_at stays NULL, which is the whole signal: the sweep will come back
+    // for it, and until then /api/amenities admits it doesn't know yet.
+    console.error(`⚠️ POI fetch for ${label} failed:`, (err as Error).message);
+    return false;
+  }
+};
+
 // One import at a time, oldest first. The areas table is the queue — a broker
 // would buy nothing while there is a single app process.
 // ponytail: single-process worker. Two app replicas would need
@@ -805,58 +905,10 @@ const runImport = async (areaId: number) => {
       }
     );
 
-    // POIs live in one global table, independent of the routing schemas, so
-    // this is additive and a failure here must not fail the import — an area
-    // that routes but has no amenities is still useful. `out center` gives
-    // ways a point without us assembling their geometry.
-    try {
-      // `nwr` in one statement rather than four selectors, and a pause before
-      // asking: this is the second Overpass call of the import, and firing it
-      // immediately after the graph fetch earned a 504 every time.
-      const poiQuery =
-        `[out:json][timeout:120];(nwr["amenity"](${bs},${bw},${bn},${be});` +
-        `nwr["shop"](${bs},${bw},${bn},${be}););out center tags;`;
-      let pr: Response | undefined;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        await sleep(attempt === 0 ? 3000 : 15000);
-        pr = await fetch(OVERPASS_URL, {
-          method: "POST",
-          headers: { "User-Agent": USER_AGENT },
-          body: new URLSearchParams({ data: poiQuery }),
-          signal: AbortSignal.timeout(150_000),
-        });
-        if (pr.ok) break;
-        console.log(`↻ ${schemaName}: POI fetch got ${pr.status}, retrying`);
-      }
-      if (!pr?.ok) throw new Error(`Overpass ${pr?.status}`);
-      const els = (await pr.json()).elements ?? [];
-      const rows = els
-        .map((e: any) => {
-          const y = e.lat ?? e.center?.lat;
-          const x = e.lon ?? e.center?.lon;
-          const cat = e.tags?.amenity ? "amenity" : e.tags?.shop ? "shop" : null;
-          if (!y || !x || !cat) return null;
-          return [e.type[0], e.id, cat, e.tags[cat], e.tags.name ?? null, x, y];
-        })
-        .filter(Boolean);
-      for (let i = 0; i < rows.length; i += 1000) {
-        const chunk = rows.slice(i, i + 1000);
-        const values = chunk
-          .map((_: unknown, j: number) => {
-            const b = j * 7;
-            return `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},ST_SetSRID(ST_MakePoint($${b + 6},$${b + 7}),4326))`;
-          })
-          .join(",");
-        await pool.query(
-          `INSERT INTO public.pois (osm_type, osm_id, category, kind, name, geom)
-           VALUES ${values} ON CONFLICT DO NOTHING`,
-          chunk.flat()
-        );
-      }
-      console.log(`🍽️ ${schemaName}: ${rows.length} POIs`);
-    } catch (err) {
-      console.error(`⚠️ POI fetch for ${schemaName} failed:`, (err as Error).message);
-    }
+    // Additive and independent of the graph, so a failure here must not fail
+    // the import — and, since T-011, must not be the end of it either: the
+    // sweep below retries whatever this leaves unstamped.
+    await loadPois(areaId, schemaName, bs, bw, bn, be);
 
     // Assert the graph is actually routable before advertising it. A schema
     // with ways but no main component routes nowhere, and the only symptom
@@ -934,6 +986,49 @@ const drainQueue = async () => {
 
 // A queued retry has nothing to wake it, so re-check periodically.
 setInterval(() => void drainQueue(), 30_000).unref?.();
+
+// T-011: an area whose POI fetch failed keeps pois_at NULL, and the import it
+// belonged to is long over. Retry it here instead, one area per tick, so the
+// retry is not bounded by the lifetime of the job that first tried.
+//
+// Shares importInFlight with drainQueue: two concurrent Overpass calls from
+// this box is exactly what earns the 429s the pacing exists to avoid.
+//
+// ponytail: no attempt counter. One area every 10 minutes is a low enough
+// ceiling that a permanently unfetchable bbox is not worth a column — add one
+// if the logs ever fill with the same id.
+const POI_SWEEP_MS = parseInt(process.env.POI_SWEEP_MS ?? "600000", 10);
+
+const sweepPois = async () => {
+  if (importInFlight) return;
+  importInFlight = true;
+  try {
+    // Most recently *used* first, not oldest: the area someone just imported
+    // and is looking at right now is the one with a person waiting on it.
+    // Reuses the stamp LRU eviction already maintains.
+    //
+    // The same buffered box the import used — a served area walks out past its
+    // own edge, so its amenities have to as well.
+    const next = await pool.query(
+      `SELECT id, schema_name,
+              ST_YMin(imported_bbox) AS s, ST_XMin(imported_bbox) AS w,
+              ST_YMax(imported_bbox) AS n, ST_XMax(imported_bbox) AS e
+         FROM public.areas
+        WHERE status = 'ready' AND pois_at IS NULL
+        ORDER BY COALESCE(last_used_at, created_at) DESC LIMIT 1`
+    );
+    const a = next.rows[0];
+    if (!a) return;
+    console.log(`🔁 backfilling POIs for ${a.schema_name}`);
+    await loadPois(a.id, a.schema_name, a.s, a.w, a.n, a.e);
+  } catch (err) {
+    console.error("⚠️ POI sweep stopped:", (err as Error).message);
+  } finally {
+    importInFlight = false;
+  }
+};
+
+setInterval(() => void sweepPois(), POI_SWEEP_MS).unref?.();
 
 // Destinations worth searching for, grouped. Defined here and served to the
 // client so the two can't drift: the UI colours, filters and labels all come
@@ -1034,8 +1129,11 @@ app.get("/api/amenities", async (req: any, res: any) => {
   // is only a safety valve.
   const limit = Math.min(3000, parseInt(req.query.limit ?? "3000", 10) || 3000);
 
-  const { schema } = await resolveSchema(lat, lon);
-  const key = `poi:${schema}:${lat.toFixed(5)},${lon.toFixed(
+  const { schema, poisLoaded } = await resolveSchema(lat, lon);
+  // `poi2` since poisLoaded joined the body: entries cached under the old key
+  // answer without the field, and a 24h TTL outlives any deploy. Bump the
+  // prefix on the next shape change too — it beats remembering to flush.
+  const key = `poi2:${schema}:${lat.toFixed(5)},${lon.toFixed(
     5
   )}:${minutes}:${profile}:${kinds.join("|")}:${limit}`;
 
@@ -1088,11 +1186,14 @@ app.get("/api/amenities", async (req: any, res: any) => {
     const body = {
       profile,
       minutes,
+      poisLoaded,
       count: r.rows.length,
       truncated: r.rows.length === limit,
       items: r.rows,
     };
-    await cacheSet(key, JSON.stringify(body), 60 * 60 * 24);
+    // Never cache a "don't know yet": the sweep will fill this area in, and a
+    // 24h cached empty list would outlive the fix by a day.
+    if (poisLoaded) await cacheSet(key, JSON.stringify(body), 60 * 60 * 24);
     console.log(`🍽️ ${r.rows.length} amenities in ${Date.now() - start}ms`);
     res.json(body);
   } catch (err) {
