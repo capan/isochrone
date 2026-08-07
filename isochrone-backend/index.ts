@@ -191,6 +191,22 @@ const aheadSql = (alias: string) =>
     WHERE q.status IN ('queued','importing') AND q.created_at < ${alias}.created_at`;
 
 const ensureAreasTable = async () => {
+  // POIs are points, unrelated to any routing graph, so they live in one
+  // global table: Berlin was loaded from its own extract, imported areas add
+  // to it, and overlapping imports dedup on the OSM id.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS public.pois (
+      osm_type char(1) NOT NULL,
+      osm_id   bigint  NOT NULL,
+      category text    NOT NULL,
+      kind     text    NOT NULL,
+      name     text,
+      geom     geometry(Point,4326) NOT NULL,
+      PRIMARY KEY (osm_type, osm_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_pois_geom ON public.pois USING GIST (geom);
+    CREATE INDEX IF NOT EXISTS idx_pois_kind ON public.pois (kind);
+  `);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS public.areas (
       id            serial PRIMARY KEY,
@@ -663,6 +679,59 @@ const runImport = async (areaId: number) => {
       }
     );
 
+    // POIs live in one global table, independent of the routing schemas, so
+    // this is additive and a failure here must not fail the import — an area
+    // that routes but has no amenities is still useful. `out center` gives
+    // ways a point without us assembling their geometry.
+    try {
+      // `nwr` in one statement rather than four selectors, and a pause before
+      // asking: this is the second Overpass call of the import, and firing it
+      // immediately after the graph fetch earned a 504 every time.
+      const poiQuery =
+        `[out:json][timeout:120];(nwr["amenity"](${bs},${bw},${bn},${be});` +
+        `nwr["shop"](${bs},${bw},${bn},${be}););out center tags;`;
+      let pr: Response | undefined;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await sleep(attempt === 0 ? 3000 : 15000);
+        pr = await fetch(OVERPASS_URL, {
+          method: "POST",
+          headers: { "User-Agent": "isochrone/0.1 (+https://iso.huseyincapan.dev)" },
+          body: new URLSearchParams({ data: poiQuery }),
+          signal: AbortSignal.timeout(150_000),
+        });
+        if (pr.ok) break;
+        console.log(`↻ ${schemaName}: POI fetch got ${pr.status}, retrying`);
+      }
+      if (!pr?.ok) throw new Error(`Overpass ${pr?.status}`);
+      const els = (await pr.json()).elements ?? [];
+      const rows = els
+        .map((e: any) => {
+          const y = e.lat ?? e.center?.lat;
+          const x = e.lon ?? e.center?.lon;
+          const cat = e.tags?.amenity ? "amenity" : e.tags?.shop ? "shop" : null;
+          if (!y || !x || !cat) return null;
+          return [e.type[0], e.id, cat, e.tags[cat], e.tags.name ?? null, x, y];
+        })
+        .filter(Boolean);
+      for (let i = 0; i < rows.length; i += 1000) {
+        const chunk = rows.slice(i, i + 1000);
+        const values = chunk
+          .map((_: unknown, j: number) => {
+            const b = j * 7;
+            return `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},ST_SetSRID(ST_MakePoint($${b + 6},$${b + 7}),4326))`;
+          })
+          .join(",");
+        await pool.query(
+          `INSERT INTO public.pois (osm_type, osm_id, category, kind, name, geom)
+           VALUES ${values} ON CONFLICT DO NOTHING`,
+          chunk.flat()
+        );
+      }
+      console.log(`🍽️ ${schemaName}: ${rows.length} POIs`);
+    } catch (err) {
+      console.error(`⚠️ POI fetch for ${schemaName} failed:`, (err as Error).message);
+    }
+
     // Assert the graph is actually routable before advertising it. A schema
     // with ways but no main component routes nowhere, and the only symptom
     // used to be a 500 on the first click — long after the import "succeeded".
@@ -736,6 +805,138 @@ const drainQueue = async () => {
 
 // A queued retry has nothing to wake it, so re-check periodically.
 setInterval(() => void drainQueue(), 30_000).unref?.();
+
+// Destinations worth searching for. The extract is three-quarters parking
+// bays, benches and waste baskets, so everything is stored and only this
+// subset is queryable — the list can change without re-importing anything.
+const AMENITY_KINDS = [
+  "restaurant", "cafe", "bar", "pub", "fast_food", "ice_cream",
+  "pharmacy", "doctors", "hospital", "clinic", "dentist",
+  "school", "kindergarten", "university", "library", "theatre", "cinema",
+  "bank", "atm", "post_office", "marketplace", "fuel", "playground",
+  "supermarket", "bakery", "butcher", "greengrocer", "convenience",
+  "clothes", "hairdresser", "books", "florist", "optician", "hardware",
+];
+
+// The reachable-edge set, as a CTE. Shared so the isochrone and the amenity
+// lookup can never disagree about what "reachable" means.
+const reachableEdgesSql = (
+  schema: string,
+  profile: ProfileName,
+  maxCost: number,
+  lat: number,
+  lon: number
+) => {
+  const reachM = maxCost * PROFILES[profile].speed;
+  const dLat = reachM / 111320;
+  const dLon = reachM / (111320 * Math.cos((lat * Math.PI) / 180));
+  const bbox =
+    `geom && ST_Expand(ST_SetSRID(ST_MakePoint(${lon.toFixed(6)}, ` +
+    `${lat.toFixed(6)}), 4326), ${dLon.toFixed(6)}, ${dLat.toFixed(6)})`;
+  return `SELECT edge, agg_cost FROM pgr_drivingDistance(
+      'SELECT id::integer AS id, source::integer, target::integer,
+        ${costExpr(profile)} AS cost, ${costExpr(profile)} AS reverse_cost
+       FROM ${schema}.ways WHERE ${bbox}',
+      (SELECT id FROM ${schema}.ways_vertices_pgr WHERE main_component
+        ORDER BY geom <-> ST_SetSRID(ST_MakePoint(${lon.toFixed(6)}, ${lat.toFixed(
+    6
+  )}), 4326) LIMIT 1)::integer,
+      ${maxCost}::double precision)
+     WHERE edge > 0`;
+};
+
+app.get("/api/amenities", async (req: any, res: any) => {
+  const start = Date.now();
+  const lat = parseFloat(req.query.lat);
+  const lon = parseFloat(req.query.lon);
+  const profile = (req.query.profile ?? "walk") as ProfileName;
+  if (!Object.prototype.hasOwnProperty.call(PROFILES, profile)) {
+    return res.status(400).json({ error: "Unknown profile" });
+  }
+  if (isNaN(lat) || isNaN(lon)) {
+    return res.status(400).json({ error: "Invalid lat or lon" });
+  }
+  const cap = maxMinutesFor(profile);
+  const minutes = Math.min(cap, parseInt(req.query.minutes ?? "15", 10) || 15);
+
+  // Whitelisted against AMENITY_KINDS, so nothing user-supplied reaches SQL.
+  const wanted = String(req.query.kinds ?? "")
+    .split(",")
+    .map((k) => k.trim())
+    .filter((k) => AMENITY_KINDS.includes(k));
+  const kinds = wanted.length ? wanted : AMENITY_KINDS;
+  const limit = Math.min(200, parseInt(req.query.limit ?? "60", 10) || 60);
+
+  const { schema } = await resolveSchema(lat, lon);
+  const key = `poi:${schema}:${lat.toFixed(5)},${lon.toFixed(
+    5
+  )}:${minutes}:${profile}:${kinds.join("|")}:${limit}`;
+
+  try {
+    const cached = await cacheGet(key);
+    if (cached) {
+      cacheHits++;
+      return res.json(JSON.parse(cached));
+    }
+    cacheMisses++;
+
+    // Joining POIs against each reachable edge keeps the GIST index in play.
+    // Collecting the edges into one geometry first and casting to geography
+    // measured 286s against 0.5s for this shape.
+    const r = await pool.query(
+      `WITH dd AS (${reachableEdgesSql(schema, profile, minutes * 60, lat, lon)}),
+       hits AS (
+         SELECT p.osm_type, p.osm_id, p.kind, p.category, p.name, p.geom,
+                MIN(dd.agg_cost) AS cost_s
+           FROM dd
+           JOIN ${schema}.ways w ON w.id = dd.edge
+           JOIN public.pois p
+             ON p.geom && ST_Expand(w.geom, 0.00045)
+            AND ST_DWithin(p.geom, w.geom, 0.00045)
+          WHERE p.kind = ANY($1::text[])
+          GROUP BY p.osm_type, p.osm_id, p.kind, p.category, p.name, p.geom
+       ),
+       -- OSM often maps one place as both a node and a building way, so the
+       -- same cafe arrives twice. Collapse same kind + same name within a
+       -- ~60m grid cell; two branches further apart stay separate, and
+       -- unnamed POIs fall back to their id so they never merge.
+       deduped AS (
+         SELECT DISTINCT ON (kind, COALESCE(name, osm_type || osm_id::text),
+                             ST_SnapToGrid(geom, 0.0006))
+                kind, category, name, geom, cost_s
+           FROM hits
+          ORDER BY kind, COALESCE(name, osm_type || osm_id::text),
+                   ST_SnapToGrid(geom, 0.0006), cost_s
+       )
+       SELECT kind, category, name,
+              ROUND(ST_Y(geom)::numeric, 6) AS lat,
+              ROUND(ST_X(geom)::numeric, 6) AS lon,
+              ROUND((cost_s / 60)::numeric, 1) AS minutes
+         FROM deduped
+        ORDER BY cost_s
+        LIMIT $2`,
+      [kinds, limit]
+    );
+
+    const body = {
+      profile,
+      minutes,
+      count: r.rows.length,
+      truncated: r.rows.length === limit,
+      items: r.rows,
+    };
+    await cacheSet(key, JSON.stringify(body), 60 * 60 * 24);
+    console.log(`🍽️ ${r.rows.length} amenities in ${Date.now() - start}ms`);
+    res.json(body);
+  } catch (err) {
+    console.error("❌ amenities error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.get("/api/amenity-kinds", (_, res) => {
+  res.json(AMENITY_KINDS);
+});
 
 app.get("/api/isochrone", async (req: any, res: any) => {
   const start = Date.now();
