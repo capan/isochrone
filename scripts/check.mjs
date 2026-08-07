@@ -80,4 +80,19 @@ for (const [lat, lon] of LOCS) {
   );
 }
 
+// T-011: amenities must say whether the area's POIs ever loaded. Berlin ships
+// with its own, so an empty list here would mean genuinely nothing in reach —
+// never "we don't know". `false` for a covered point is the bug this guards.
+{
+  const r = await fetch(
+    `${API}/api/amenities?lat=52.52&lon=13.405&profile=walk&minutes=15`
+  );
+  const d = await r.json();
+  const ok = d.poisLoaded === true && d.count > 0;
+  if (!ok) failed++;
+  console.log(
+    `${ok ? "✅" : "❌"} amenities → poisLoaded=${d.poisLoaded} count=${d.count}`
+  );
+}
+
 process.exit(failed ? 1 : 0);
