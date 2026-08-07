@@ -101,7 +101,10 @@ const savedBasemap = (): BasemapKey => {
   } catch {
     /* no storage; fall through to the default */
   }
-  return "dark";
+  // Voyager: enough colour and labelling that an unfamiliar city reads as a
+  // place rather than a diagram, which matters more on first load than the
+  // contrast Dark Matter gives the bands.
+  return "voyager";
 };
 
 // Groups (labels, icons, colours, and which kinds belong to each) are served
@@ -187,6 +190,8 @@ export default function MapView() {
   // increments per draw request, so a slow response can tell it has been
   // overtaken and decline to paint itself over a newer one
   const drawGenRef = useRef(0);
+  // the coverage fit is a first-load framing, not something the 5s poll redoes
+  const didFitRef = useRef(false);
   const [shownMinutes, setShownMinutes] = useState(MAX_MINUTES);
   // ref for the map effect (closes over it once), state for the legend
   const basemapRef = useRef<BasemapKey>(savedBasemap());
@@ -393,6 +398,36 @@ export default function MapView() {
         /* fall back to MAX_MINUTES; the server still enforces the real cap */
       });
 
+    // T-005: a first visitor lands inside Berlin and never sees the veil, so
+    // "import your own area" never presents itself. Frame the shipped city so
+    // its edge — and the dark beyond it — is on screen without panning.
+    //
+    // fitBounds rather than a hardcoded zoom: the right zoom depends on the
+    // viewport, and a number tuned on a laptop shows no edge at all on a
+    // phone. The padding is the point, not politeness — it is the band of
+    // uncovered ground the veil paints.
+    //
+    // Fitting /api/coverage instead would zoom out to the whole world, since
+    // coverage now spans Berlin, Prague, Munich and Tucson. The shipped city
+    // is the row whose schema is not area_* — the same distinction the
+    // recently-added list draws, inverted.
+    const fitToCity = (areas: Area[]) => {
+      // A deep link already names the place to look at; never yank it away.
+      if (didFitRef.current || (!isNaN(urlLat) && !isNaN(urlLon))) return;
+      const city = areas.find((a) => a.schema_name && !a.schema_name.startsWith("area_"));
+      if (!city) return; // fresh deployment with no city seeded yet
+      didFitRef.current = true;
+      map.fitBounds(
+        [
+          [city.min_lat, city.min_lon],
+          [city.max_lat, city.max_lon],
+        ],
+        // animate:false so this reads as the starting view, not as the map
+        // flying away from you a second after it settled.
+        { padding: [50, 50], animate: false }
+      );
+    };
+
     // Every visitor polls the same registry, so an import someone else started
     // shows up on your map while it runs.
     const refreshAreas = async () => {
@@ -406,6 +441,7 @@ export default function MapView() {
         // The panel list rides the poll that already runs for the overlay —
         // "without any new endpoint" (T-004), and without a second timer.
         setAreas(areas);
+        fitToCity(areas);
         const group = areasRef.current;
         if (!group) return;
         group.clearLayers();
