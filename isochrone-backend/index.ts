@@ -138,6 +138,8 @@ const OVERPASS_URL =
   process.env.OVERPASS_URL ?? "https://overpass-api.de/api/interpreter";
 const NOMINATIM_URL =
   process.env.NOMINATIM_URL ?? "https://nominatim.openstreetmap.org/search";
+const NOMINATIM_REVERSE_URL =
+  process.env.NOMINATIM_REVERSE_URL ?? "https://nominatim.openstreetmap.org/reverse";
 
 // Both OSM services want an identifying agent in their usage policy, and
 // Overpass's Apache goes further: it answers Node's default UA ("node") with a
@@ -231,6 +233,10 @@ const ensureAreasTable = async () => {
     -- stamps it even when it returns nothing, which is the only way to tell a
     -- genuinely amenity-free rural box from one whose fetch failed.
     ALTER TABLE public.areas ADD COLUMN IF NOT EXISTS pois_at timestamptz;
+    -- NULL = never reverse-geocoded, or the lookup failed. The UI falls back to
+    -- coordinates in that case. No backfill for existing rows: this is stamped
+    -- once, at import time, same as pois_at.
+    ALTER TABLE public.areas ADD COLUMN IF NOT EXISTS name text;
     CREATE INDEX IF NOT EXISTS idx_areas_bbox ON public.areas USING GIST (bbox);
   `);
   // The shipped city is a schema, not an imported area. Give it a row so the
@@ -407,7 +413,7 @@ const pollLimiter = rateLimit({
 
 app.get("/api/areas", pollLimiter, async (_, res) => {
   const r = await pool.query(
-    `SELECT id, schema_name, status, created_at,
+    `SELECT id, schema_name, status, created_at, name,
             ST_YMin(bbox) AS min_lat, ST_XMin(bbox) AS min_lon,
             ST_YMax(bbox) AS max_lat, ST_XMax(bbox) AS max_lon
        FROM public.areas ORDER BY created_at`
@@ -472,6 +478,45 @@ const geocodeSlot = () => {
   const mine = geocodeGate;
   geocodeGate = mine.then(() => sleep(1000));
   return mine;
+};
+
+// One human-readable name per imported area, fetched once at import time (see
+// the call site in runImport). Shares geocodeSlot's 1-req/s gate rather than
+// opening a second path to Nominatim, and must never reject: an area that
+// routes but has no name is still useful, same rule loadPois follows.
+const reverseGeocode = async (lat: number, lon: number): Promise<string | null> => {
+  const key = `revgeo:${lat.toFixed(4)},${lon.toFixed(4)}`;
+  const cached = await cacheGet(key);
+  if (cached) return JSON.parse(cached as string);
+
+  await geocodeSlot();
+  let name: string | null = null;
+  try {
+    // zoom=12 is town/city granularity. The default (18) returns a building
+    // address, which is wrong for a 5x5km box centred on nothing in particular.
+    const r = await fetch(
+      `${NOMINATIM_REVERSE_URL}?format=jsonv2&zoom=12&lat=${lat}&lon=${lon}`,
+      { headers: { "User-Agent": USER_AGENT }, signal: AbortSignal.timeout(10_000) }
+    );
+    if (r.ok) {
+      const displayName = ((await r.json()) as any)?.display_name as string | undefined;
+      // display_name is a full postal chain; the first two segments are the
+      // useful part — "Pankow, Berlin, Deutschland" → "Pankow, Berlin". Drop
+      // the second when it only restates the first: 52.4785,12.8385 reverses
+      // to "Ketzin, Ketzin/Havel, Havelland, ..." and the answer is "Ketzin".
+      if (displayName) {
+        const parts = displayName.split(",").map((s) => s.trim()).filter(Boolean);
+        const redundant =
+          parts.length > 1 &&
+          (parts[1].startsWith(parts[0]) || parts[0].startsWith(parts[1]));
+        name = parts.slice(0, redundant ? 1 : 2).join(", ").slice(0, 80) || null;
+      }
+    }
+  } catch {
+    // Cached below regardless — a repeated failure should not be a repeated request.
+  }
+  await cacheSet(key, JSON.stringify(name), 60 * 60 * 24 * 7);
+  return name;
 };
 
 app.get("/api/search", async (req: any, res: any) => {
@@ -952,9 +997,23 @@ const runImport = async (areaId: number) => {
       throw new Error("import produced no routable vertices");
     }
 
-    await pool.query(`UPDATE public.areas SET status = 'ready' WHERE id = $1`, [
-      areaId,
-    ]);
+    // The one moment per area to do this: the requested bbox (where the person
+    // actually clicked, not the buffered imported_bbox) is still in scope, and
+    // doing this on read instead would put Nominatim on the /api/areas polling
+    // path. reverseGeocode never rejects, so a failed lookup just leaves NULL.
+    const centre = (
+      await pool.query(
+        `SELECT ST_Y(ST_Centroid(bbox)) AS lat, ST_X(ST_Centroid(bbox)) AS lon
+           FROM public.areas WHERE id = $1`,
+        [areaId]
+      )
+    ).rows[0];
+    const name = await reverseGeocode(centre.lat, centre.lon);
+
+    await pool.query(
+      `UPDATE public.areas SET status = 'ready', name = $2 WHERE id = $1`,
+      [areaId, name]
+    );
     console.log(
       `✅ imported ${schemaName} (${counts.rows[0].ways} ways) in ${
         Date.now() - start

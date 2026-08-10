@@ -42,6 +42,13 @@ check(
   "at least one ready area is registered",
   `${areas.length} total`
 );
+// Presence, not non-null: pre-existing areas are never backfilled, and a
+// re-run of this script hits the dedup path, so a non-null assertion here
+// would be flaky.
+check(
+  areas.every((a) => "name" in a && (a.name === null || typeof a.name === "string")),
+  "every area has a name field (string or null)"
+);
 
 // 1b. merged coverage — the map veils everything outside this, and overlapping
 // boxes must arrive already unioned or the veil re-fills the overlap
