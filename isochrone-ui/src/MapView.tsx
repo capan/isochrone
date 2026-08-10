@@ -132,6 +132,7 @@ type Area = {
   schema_name: string | null;
   status: string;
   created_at: string;
+  name: string | null;
   min_lat: number;
   min_lon: number;
   max_lat: number;
@@ -860,9 +861,11 @@ export default function MapView() {
     .sort((a, b) => b.created_at.localeCompare(a.created_at))
     .slice(0, 5);
 
-  // No names: nothing in the schema holds one, and reverse-geocoding on every
-  // render would be a Nominatim call per area per viewer. Centre coordinates
-  // are at least honest, and the button is the part that matters.
+  // Fallback only now: names are fetched once server-side at import time (see
+  // runImport), not here — reverse-geocoding on every render would still be a
+  // Nominatim call per area per viewer. Used for pre-existing areas (never
+  // backfilled), failed lookups, and areas still importing (name isn't set
+  // until ready).
   const coords = (a: Area) =>
     `${((a.min_lat + a.max_lat) / 2).toFixed(3)}, ${(
       (a.min_lon + a.max_lon) / 2
@@ -1071,7 +1074,7 @@ export default function MapView() {
                     >
                       <span className="re-where">
                         {a.status === "ready"
-                          ? coords(a)
+                          ? a.name ?? coords(a)
                           : `${coords(a)} · ${a.status}`}
                       </span>
                       <span className="re-when">
