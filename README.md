@@ -100,6 +100,15 @@ Berlin restores to ~587MB (the source schema is larger only because of dead
 tuples from the cost UPDATEs). The `db` image is pinned to the major version the
 dump came from — a dump will not restore into an older Postgres.
 
+To generate live "where should I live" suggestions, precompute the reach field
+(walking distance to the nearest amenity per grid cell):
+
+    cd scripts && node --loader ts-node/esm precompute-reach.ts
+
+The precompute is off-box, unattended, takes ~9 hours for Berlin, and is
+resumable. It must **never** run against production — pgRouting's C loops ignore
+cancellation, so only `pg_terminate_backend` can stop a runaway traversal.
+
 ### Verifying a deployment
 
     API=https://iso.example.com node scripts/check.mjs

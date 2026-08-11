@@ -172,6 +172,170 @@ const saveMine = (ids: number[]) => {
   }
 };
 
+// --- "where should I live" questionnaire --------------------------------
+// Mirrors isochrone-backend/layers.ts REACH_LAYERS. Kept as a local literal
+// union rather than an import: nothing else in this file imports backend
+// modules, and the set only changes in lockstep with a backend release.
+type ReachLayer =
+  | "groceries"
+  | "health"
+  | "kindergarten"
+  | "school"
+  | "playground"
+  | "greenspace"
+  | "dining";
+
+const LAYER_LABEL: Record<ReachLayer, string> = {
+  groceries: "groceries",
+  health: "pharmacy/doctor",
+  kindergarten: "kindergarten",
+  school: "school",
+  playground: "playground",
+  greenspace: "green space",
+  dining: "dining",
+};
+
+type SuggestCell = {
+  lat: number;
+  lon: number;
+  score: number;
+  layers: Partial<Record<ReachLayer, number>>;
+};
+
+// Five questions set weights; the answers are typed as a closed union each,
+// which is what keeps the 324-combination answer space closed (T-016) — a
+// free-text or numeric answer here would blow that open again.
+type SuggestAnswers = {
+  household: "alone" | "kids_u6" | "kids_school";
+  groceries: "often" | "weekly";
+  health: "important" | "nice" | "not";
+  green: "lot" | "some" | "not";
+  dining: "often" | "sometimes" | "rarely";
+};
+
+const DEFAULT_SUGGEST_ANSWERS: SuggestAnswers = {
+  household: "alone",
+  groceries: "weekly",
+  health: "nice",
+  green: "some",
+  dining: "sometimes",
+};
+
+type WeightQuestion = {
+  id: keyof SuggestAnswers;
+  kind: "weight";
+  label: string;
+  options: {
+    value: string;
+    label: string;
+    weights: Partial<Record<ReachLayer, number>>;
+  }[];
+};
+type MobilityQuestion = {
+  id: "mobility";
+  kind: "profile";
+  label: string;
+  options: { value: "walk" | "wheelchair"; label: string }[];
+};
+type SuggestQuestion = WeightQuestion | MobilityQuestion;
+
+// One table drives both the buttons and the weight vector sent to
+// /api/suggest, so the two can't drift. "mobility" is the exception: it picks
+// `profile`, not a weight — wheelchair is a different graph traversal (stairs
+// impassable), not a taste to be scored, so it never enters the weight sum.
+const SUGGEST_QUESTIONS: SuggestQuestion[] = [
+  {
+    id: "household",
+    kind: "weight",
+    label: "Who's moving?",
+    options: [
+      { value: "alone", label: "Just me", weights: {} },
+      {
+        value: "kids_u6",
+        label: "With kids under 6",
+        weights: { kindergarten: 3, playground: 2 },
+      },
+      {
+        value: "kids_school",
+        label: "With school-age kids",
+        weights: { school: 3, playground: 2 },
+      },
+    ],
+  },
+  {
+    id: "mobility",
+    kind: "profile",
+    label: "How do you get around?",
+    options: [
+      { value: "walk", label: "Walking" },
+      { value: "wheelchair", label: "Wheelchair" },
+    ],
+  },
+  {
+    id: "groceries",
+    kind: "weight",
+    label: "Food shopping?",
+    options: [
+      { value: "often", label: "Most days", weights: { groceries: 3 } },
+      { value: "weekly", label: "Once a week", weights: { groceries: 1 } },
+    ],
+  },
+  {
+    id: "health",
+    kind: "weight",
+    label: "Doctors and pharmacies nearby?",
+    options: [
+      { value: "important", label: "Important", weights: { health: 3 } },
+      { value: "nice", label: "Nice to have", weights: { health: 1 } },
+      { value: "not", label: "Not really", weights: { health: 0 } },
+    ],
+  },
+  {
+    id: "green",
+    kind: "weight",
+    label: "Green space?",
+    options: [
+      { value: "lot", label: "A lot", weights: { greenspace: 3 } },
+      { value: "some", label: "Some", weights: { greenspace: 1 } },
+      { value: "not", label: "Not much", weights: { greenspace: 0 } },
+    ],
+  },
+  {
+    id: "dining",
+    kind: "weight",
+    label: "Eating and drinking out?",
+    options: [
+      { value: "often", label: "Often", weights: { dining: 3 } },
+      { value: "sometimes", label: "Sometimes", weights: { dining: 1 } },
+      { value: "rarely", label: "Rarely", weights: { dining: 0 } },
+    ],
+  },
+];
+
+// Groceries always carries a non-zero weight (3 or 1, never 0 — the question
+// has no "not really" option), so sum(w) can never be zero and the backend's
+// score = sum(w_i * layer_i) / sum(w_i) never divides by it.
+const buildSuggestWeights = (
+  answers: SuggestAnswers
+): Partial<Record<ReachLayer, number>> => {
+  const w: Partial<Record<ReachLayer, number>> = {};
+  for (const q of SUGGEST_QUESTIONS) {
+    if (q.kind !== "weight") continue;
+    const opt = q.options.find((o) => o.value === answers[q.id]);
+    if (opt) Object.assign(w, opt.weights);
+  }
+  return w;
+};
+
+// Dropping zero weights here, not just in buildSuggestWeights: a weight of 0
+// ("not really") is a real answer but not a request term the endpoint wants —
+// it already treats an absent layer as "don't care".
+const suggestQueryParam = (w: Partial<Record<ReachLayer, number>>) =>
+  Object.entries(w)
+    .filter(([, v]) => (v ?? 0) > 0)
+    .map(([k, v]) => `${k}:${v}`)
+    .join(",");
+
 export default function MapView() {
   const mapRef = useRef<L.Map | null>(null);
   const isochroneRef = useRef<L.LayerGroup | null>(null);
@@ -245,6 +409,12 @@ export default function MapView() {
   const placesGenRef = useRef(0);
   const drawPlacesRef = useRef<(items: Place[]) => void>(() => {});
   const loadPlacesRef = useRef<(lat: number, lon: number) => void>(() => {});
+  // Suggestion markers get their own layer group, same pattern as places: a
+  // second set of dots the isochrone/places lifecycle must not clear.
+  const suggestLayerRef = useRef<L.LayerGroup | null>(null);
+  const drawSuggestRef = useRef<(cells: SuggestCell[]) => void>(() => {});
+  const focusSuggestionRef = useRef<(c: SuggestCell) => void>(() => {});
+  const suggestAbortRef = useRef<AbortController | null>(null);
   const [copied, setCopied] = useState(false);
   const [helpFocus, setHelpFocus] = useState<"assistant" | undefined>(undefined);
   // Only a deep link carries lat+lon, and only the MCP server hands those out,
@@ -262,6 +432,22 @@ export default function MapView() {
   const [searchError, setSearchError] = useState("");
   // Filled by the same 5s poll that draws the coverage overlay.
   const [areas, setAreas] = useState<Area[]>([]);
+
+  // "Where should I live" questionnaire. One state object for the five
+  // weight-bearing answers (mirrors the `jobs`/`caps` grouping already used
+  // here), profile kept separate since it also drives the isochrone picker
+  // vocabulary ("walk"/"wheelchair" only — no stroller/bike for suggestions,
+  // per T-016).
+  const [suggestAnswers, setSuggestAnswers] = useState<SuggestAnswers>(
+    DEFAULT_SUGGEST_ANSWERS
+  );
+  const [suggestProfile, setSuggestProfile] = useState<"walk" | "wheelchair">(
+    "walk"
+  );
+  const [suggestCells, setSuggestCells] = useState<SuggestCell[]>([]);
+  const [suggestState, setSuggestState] =
+    useState<"loading" | "ok" | "empty" | "unavailable" | "error">("loading");
+  const [suggestReason, setSuggestReason] = useState("");
 
   const closeHelp = () => {
     setHelp(false);
@@ -372,6 +558,30 @@ export default function MapView() {
           )
           .addTo(g);
       }
+    };
+
+    // Suggestion markers: styled entirely through circleMarker options (no
+    // CSS class), so "best clearly distinguished" holds regardless of
+    // stylesheet — rank 1 is bigger and amber, the rest are smaller and blue.
+    suggestLayerRef.current = L.layerGroup().addTo(map);
+    drawSuggestRef.current = (cells: SuggestCell[]) => {
+      const g = suggestLayerRef.current;
+      if (!g) return;
+      g.clearLayers();
+      cells.forEach((c, i) => {
+        L.circleMarker([c.lat, c.lon], {
+          radius: i === 0 ? 12 : 8,
+          weight: 2,
+          color: "#fff",
+          fillColor: i === 0 ? "#ffb703" : "#3a86ff",
+          fillOpacity: 0.92,
+        })
+          .bindTooltip(`#${i + 1} · ${Math.round(c.score * 100)}% match`, {
+            direction: "top",
+          })
+          .on("click", () => focusSuggestionRef.current(c))
+          .addTo(g);
+      });
     };
 
     fetch("/api/place-groups")
@@ -729,6 +939,22 @@ export default function MapView() {
     if (window.innerWidth <= 720) setPanelOpen(false);
   };
 
+  // Same interaction as focusPlace: click a result, the map moves there.
+  // Coordinates only in the popup — the endpoint deliberately returns no
+  // name (T-016 non-goal: reverse-geocoding N results per request would sit
+  // behind the 1 req/s geocodeSlot() gate).
+  const focusSuggestion = (c: SuggestCell) => {
+    const map = mapRef.current;
+    if (!map) return;
+    map.setView([c.lat, c.lon], Math.max(map.getZoom(), 16));
+    L.popup({ closeButton: false, className: "place-popup" })
+      .setLatLng([c.lat, c.lon])
+      .setContent(`<b>${Math.round(c.score * 100)}% match</b>`)
+      .openOn(map);
+    if (window.innerWidth <= 720) setPanelOpen(false);
+  };
+  focusSuggestionRef.current = focusSuggestion;
+
   const runSearch = async (e: FormEvent) => {
     e.preventDefault();
     const q = query.trim();
@@ -848,6 +1074,48 @@ export default function MapView() {
     return () => io.disconnect();
   }, [visible, places.length]);
 
+  // Answers → weights → /api/suggest, debounced so five questions changing in
+  // quick succession fire one request, not five. No routing call happens
+  // here — this is the whole point of T-016: the field is precomputed, so
+  // re-ranking on every answer costs one Postgres aggregate, not a traversal.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      const w = suggestQueryParam(buildSuggestWeights(suggestAnswers));
+      if (!w) return; // groceries always weights >0; defensive only
+      suggestAbortRef.current?.abort();
+      const ac = new AbortController();
+      suggestAbortRef.current = ac;
+      setSuggestState("loading");
+      fetch(`/api/suggest?profile=${suggestProfile}&w=${encodeURIComponent(w)}`, {
+        signal: ac.signal,
+      })
+        .then((r) => r.json())
+        .then((d: { available: boolean; reason?: string; cells?: SuggestCell[] }) => {
+          if (!d.available) {
+            setSuggestCells([]);
+            setSuggestReason(d.reason ?? "");
+            setSuggestState("unavailable");
+            drawSuggestRef.current([]);
+            return;
+          }
+          const cells = d.cells ?? [];
+          setSuggestCells(cells);
+          setSuggestState(cells.length ? "ok" : "empty");
+          drawSuggestRef.current(cells);
+        })
+        .catch((err) => {
+          if (err?.name === "AbortError") return; // superseded by a newer answer
+          setSuggestCells([]);
+          // Not "empty": a redis or postgres blip telling someone there are no
+          // good places to live, when the truth is we failed to look, is the
+          // one wrong answer this panel must never give.
+          setSuggestState("error");
+          drawSuggestRef.current([]);
+        });
+    }, 400);
+    return () => clearTimeout(t);
+  }, [suggestAnswers, suggestProfile]);
+
   const kindLabel = (k: string) => k.replace(/_/g, " ");
 
   // Only user-imported areas: the shipped city is seeded into the same table
@@ -891,6 +1159,13 @@ export default function MapView() {
   const shown = activeGroup
     ? places.filter((pl) => activeGroup.kinds.includes(pl.kind))
     : places;
+
+  // Layers actually asked about, in the current answer set — drives which
+  // per-cell times (or "no X in 30 min") each result row prints.
+  const currentWeights = buildSuggestWeights(suggestAnswers);
+  const suggestLayers = (Object.keys(currentWeights) as ReachLayer[]).filter(
+    (l) => (currentWeights[l] ?? 0) > 0
+  );
 
   return (
     <div className="app">
@@ -977,6 +1252,97 @@ export default function MapView() {
               data yet. Click one to import it.
             </p>
           )}
+
+          <section className="suggest">
+            <div className="places-head">
+              <h2>Where should I live?</h2>
+            </div>
+            <p className="muted suggest-honesty">
+              Ranks reachability only — not rent, not noise, not transit.
+            </p>
+
+            {suggestState === "unavailable" ? (
+              <p className="muted">
+                {suggestReason ||
+                  "Suggestions are only available for Berlin right now."}
+              </p>
+            ) : (
+              <>
+                {SUGGEST_QUESTIONS.map((q) => (
+                  <div className="suggest-q" key={q.id}>
+                    <div className="suggest-q-label">{q.label}</div>
+                    <div className="seg" role="group" aria-label={q.label}>
+                      {q.options.map((o) => (
+                        <button
+                          key={o.value}
+                          aria-pressed={
+                            q.kind === "profile"
+                              ? suggestProfile === o.value
+                              : suggestAnswers[q.id] === o.value
+                          }
+                          onClick={() =>
+                            q.kind === "profile"
+                              ? setSuggestProfile(o.value as "walk" | "wheelchair")
+                              : setSuggestAnswers((a) => ({ ...a, [q.id]: o.value }))
+                          }
+                        >
+                          {o.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+
+                {suggestState === "loading" && (
+                  <p className="muted">Ranking…</p>
+                )}
+                {suggestState === "empty" && (
+                  <p className="muted">No matches for this answer set.</p>
+                )}
+                {suggestState === "error" && (
+                  <p className="suggest-miss">
+                    Could not reach the server — this is not a result, try again.
+                  </p>
+                )}
+
+                {suggestCells.length > 0 && (
+                  <ul className="place-list suggest-results">
+                    {suggestCells.map((c, i) => (
+                      <li key={`${c.lat},${c.lon}`}>
+                        <button onClick={() => focusSuggestion(c)} title="Show on map">
+                          <span className="pl-min suggest-rank">#{i + 1}</span>
+                          <span className="pl-body">
+                            <span className="pl-name">
+                              {Math.round(c.score * 100)}% match
+                            </span>
+                            <span className="pl-kind suggest-layers">
+                              {suggestLayers.map((layer) => {
+                                const secs = c.layers[layer];
+                                return (
+                                  <span
+                                    key={layer}
+                                    className={
+                                      secs == null
+                                        ? "suggest-layer suggest-miss"
+                                        : "suggest-layer"
+                                    }
+                                  >
+                                    {secs == null
+                                      ? `no ${LAYER_LABEL[layer]} in 30 min`
+                                      : `${LAYER_LABEL[layer]} ${Math.round(secs / 60)}′`}
+                                  </span>
+                                );
+                              })}
+                            </span>
+                          </span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </>
+            )}
+          </section>
 
           <section className="places">
             <div className="places-head">

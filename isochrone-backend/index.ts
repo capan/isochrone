@@ -9,6 +9,17 @@ import os from "os";
 import path from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
+import {
+  REACH_LAYERS,
+  REACH_PROFILES,
+  REACH_DECAY_SECONDS,
+  REACH_SPREAD_DEGREES,
+  REACH_SPREAD_METERS,
+  REACH_MAX_WEIGHT,
+  PROFILES,
+  ProfileName,
+  costExpr,
+} from "./layers";
 
 const execFileAsync = promisify(execFile);
 
@@ -74,33 +85,6 @@ const pool = new Pool({
   statement_timeout: 15000,
 });
 
-// Walking speed in m/s, plus per-way-type multipliers (0 = impassable).
-// tag_id values come from the `configuration` table osm2pgrouting writes:
-// 103 path, 104 steps, 105 living_street, 107 track.
-// tag_id 113 (dedicated cycleway) is impassable on foot, so the three
-// pedestrian profiles are unchanged by its arrival.
-//
-// `bike` at 4.2 m/s ≈ 15 km/h, an ordinary urban cycling average. It rides
-// footways and pedestrian zones at pushing pace rather than treating them as
-// walls, because a rider dismounts rather than turns back.
-//
-// It deliberately ignores one-way restrictions: osm2pgrouting records the
-// `oneway` tag but not `oneway:bicycle=no`, and Berlin permits contraflow
-// cycling on most one-way streets — enforcing the column we have would block
-// streets riders legally use, which is the more wrong of the two answers.
-const PROFILES = {
-  walk: { speed: 1.4, factors: { 104: 0.5, 113: 0 } },
-  stroller: { speed: 1.2, factors: { 104: 0, 103: 0.6, 107: 0.6, 113: 0 } },
-  wheelchair: {
-    speed: 0.9,
-    factors: { 104: 0, 103: 0, 107: 0, 105: 0.9, 113: 0 },
-  },
-  bike: {
-    speed: 4.2,
-    factors: { 104: 0, 101: 0.25, 102: 0.3, 103: 0.6, 107: 0.5 },
-  },
-} as const;
-
 // MAX_MINUTES bounds CPU, but it was calibrated at walking speed: cost tracks
 // the *area* the bbox pre-filter hands pgRouting, so 25min of cycling covers
 // 9x the ground and measured 21s on the production box — past the 15s
@@ -112,7 +96,6 @@ const PROFILES = {
 // radius — enough that the two profiles plainly differ — for 3.3s, where the
 // next step up costs 8s of first-click latency to gain little.
 const MAX_REACH_M = parseInt(process.env.MAX_REACH_M ?? "2520", 10);
-type ProfileName = keyof typeof PROFILES;
 
 const maxMinutesFor = (p: ProfileName) =>
   Math.min(MAX_MINUTES, Math.floor(MAX_REACH_M / (60 * PROFILES[p].speed)));
@@ -239,6 +222,38 @@ const ensureAreasTable = async () => {
     ALTER TABLE public.areas ADD COLUMN IF NOT EXISTS name text;
     CREATE INDEX IF NOT EXISTS idx_areas_bbox ON public.areas USING GIST (bbox);
   `);
+  // T-016: the reach field — seconds from every routable cell to its nearest
+  // amenity, per layer and profile — precomputed offline by
+  // scripts/precompute-reach.ts (see layers.ts for why offline, and why
+  // absence rather than a sentinel value means unreachable). Lives in
+  // DEFAULT_SCHEMA, not public, because it is derived from that schema's
+  // graph the same way ways_vertices_pgr is; imported area_* schemas never
+  // get one (see /api/suggest below). Created empty here so a fresh stack has
+  // these tables rather than missing them — the endpoint can then tell "no
+  // data yet" (empty) from a genuine bug (missing) instead of throwing.
+  //
+  // Guarded like the shipped-city INSERT below: DEFAULT_SCHEMA itself may not
+  // exist yet on a fresh deployment with no city imported, and CREATE TABLE
+  // inside a schema that doesn't exist throws.
+  await pool
+    .query(
+      `CREATE TABLE IF NOT EXISTS ${DEFAULT_SCHEMA}.reach_cells (
+         id   serial PRIMARY KEY,
+         geom geometry(Point,4326) NOT NULL UNIQUE
+       );
+       CREATE TABLE IF NOT EXISTS ${DEFAULT_SCHEMA}.reach (
+         cell_id integer  NOT NULL REFERENCES ${DEFAULT_SCHEMA}.reach_cells(id),
+         layer   text     NOT NULL,
+         profile text     NOT NULL,
+         seconds smallint NOT NULL,
+         PRIMARY KEY (cell_id, layer, profile)
+       );
+       CREATE INDEX IF NOT EXISTS idx_reach_layer_profile
+         ON ${DEFAULT_SCHEMA}.reach (layer, profile);`
+    )
+    .catch((err) =>
+      console.log(`ℹ️ no ${DEFAULT_SCHEMA} schema for reach tables yet:`, err.message)
+    );
   // The shipped city is a schema, not an imported area. Give it a row so the
   // map can draw every covered region from one endpoint instead of special
   // casing it. Harmless if the schema isn't present (fresh deployment).
@@ -366,19 +381,6 @@ const getCoverage = async (schema: string) => {
     coverageBboxes.set(schema, r.rows[0]?.b ?? "unknown");
   }
   return coverageBboxes.get(schema);
-};
-
-// Builds the cost expression pgr_drivingDistance routes on. Numbers only —
-// no user input reaches this string (profile names are whitelisted below).
-const costExpr = (name: ProfileName) => {
-  const { speed, factors } = PROFILES[name];
-  const cases = Object.entries(factors).map(
-    ([tag, f]) =>
-      `WHEN tag_id = ${tag} THEN ${f === 0 ? "-1" : `length_m / ${speed * f}`}`
-  );
-  return cases.length
-    ? `CASE ${cases.join(" ")} ELSE length_m / ${speed} END`
-    : `length_m / ${speed}`;
 };
 
 // Checked before the rate limiter so monitoring never consumes quota.
@@ -1302,6 +1304,214 @@ app.get("/api/place-groups", (_, res) => {
   res.json(PLACE_GROUPS);
 });
 
+// --- livability suggestions (T-016) -----------------------------------------
+// GET /api/suggest scores DEFAULT_SCHEMA.reach (berlin.reach in production) —
+// precomputed offline by scripts/precompute-reach.ts (layers.ts explains why
+// offline, and why an absent row means unreachable rather than a sentinel
+// value) — against a user's weight vector. No routing on this path: it is
+// one aggregate over ~134,280 precomputed cells, which is what lets the
+// questionnaire re-rank the whole map without a pgRouting call. Berlin only;
+// an imported area_* schema never gets a reach field of its own, so there is
+// no schema-resolution step here the way /api/isochrone and /api/amenities have.
+
+// Weight 0 means "ignore this layer", not "score it at zero", so those
+// entries are dropped rather than carried through as no-op joins. Sorted so
+// the same answer set keys the cache the same way regardless of arrival order.
+const normalizeWeights = (weights: Record<string, number>): [string, number][] =>
+  Object.entries(weights)
+    .filter(([, w]) => w > 0)
+    .sort(([a], [b]) => a.localeCompare(b));
+
+// suggest1: bump this prefix whenever DEFAULT_SCHEMA.reach is reloaded with a
+// different shape, or the score formula below changes — same precedent as
+// poi2 above (/api/amenities).
+const suggestCacheKey = (profile: string, entries: [string, number][]) =>
+  `suggest1:${profile}:${entries.map(([l, w]) => `${l}:${w}`).join(",")}`;
+
+// ST_SnapToGrid guarantees at most one candidate per coarse cell but nothing
+// about the gap BETWEEN cells — two candidates straddling a grid boundary can
+// land a few metres apart. Measured against a real reach field: 139m between
+// two "spread" results, for a 700m criterion. So the grid snap below is kept
+// only as a cheap pre-filter (LIMIT 200 instead of 10), and the actual 10 are
+// picked greedily by real distance in scoreSuggestions.
+//
+// Haversine, not raw degree deltas: at 52.5°N one degree of longitude is only
+// ~68% the width of one degree of latitude, so comparing lat/lon deltas
+// directly gives a thinning radius that is correct north-south and ~30% too
+// small east-west.
+const haversineM = (aLat: number, aLon: number, bLat: number, bLon: number) => {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(bLat - aLat);
+  const dLon = toRad(bLon - aLon);
+  const s =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLon / 2) ** 2;
+  return 2 * 6371000 * Math.asin(Math.sqrt(s)); // 6,371,000m = mean Earth radius
+};
+
+// Runs the scored aggregate and caches it. Shared by the live endpoint below
+// and the warm pass near the bottom of this file, so the two can never
+// disagree about the formula.
+const scoreSuggestions = async (profile: string, entries: [string, number][]) => {
+  const layers = entries.map(([l]) => l);
+  const weights = entries.map(([, w]) => w);
+  const totalWeight = weights.reduce((a, b) => a + b, 0);
+
+  // DEFAULT_SCHEMA.reach is empty until the precompute has run, and absent
+  // entirely on a fresh stack whose DEFAULT_SCHEMA hasn't been imported yet
+  // (see ensureAreasTable above). Both read the same to the caller — "not
+  // ready", not a 500 — so the UI can hide the panel on `available: false`.
+  let hasRows = false;
+  try {
+    const has = await pool.query(
+      `SELECT EXISTS (SELECT 1 FROM ${DEFAULT_SCHEMA}.reach LIMIT 1) AS has_rows`
+    );
+    hasRows = has.rows[0].has_rows;
+  } catch (err) {
+    if ((err as any).code !== "42P01") throw err; // 42P01 = undefined_table
+  }
+  if (!hasRows) {
+    return {
+      available: false as const,
+      reason: "suggestions have not been computed yet",
+    };
+  }
+
+  // layer_score = 0 at REACH_DECAY_SECONDS, 1 at 0s; GREATEST clamps a walk
+  // past the decay window rather than letting it go negative. A missing row
+  // never gets joined, which is the "no pharmacy within reach" signal falling
+  // out of the LEFT-JOIN-shaped absence for free (the join below is an inner
+  // join for exactly this reason — a row that never matches contributes 0 by
+  // not existing, same result, one fewer NULL to coalesce).
+  // totalWeight is constant across every row this query returns, so it is a
+  // bind parameter computed once in JS rather than recomputed per cell.
+  const r = await pool.query(
+    `WITH weights(layer, w) AS (
+       SELECT unnest($1::text[]), unnest($2::int[])
+     ),
+     scored AS (
+       SELECT r.cell_id,
+              (SUM(wt.w * GREATEST(0, 1 - r.seconds::numeric / $3)) / $4)::double precision AS score,
+              jsonb_object_agg(r.layer, r.seconds) AS layers
+         FROM ${DEFAULT_SCHEMA}.reach r
+         JOIN weights wt ON wt.layer = r.layer
+        WHERE r.profile = $5
+        GROUP BY r.cell_id
+     ),
+     -- Best-scoring cell per ~700m coarse cell (REACH_SPREAD_DEGREES) — a
+     -- cheap pre-filter only. It bounds candidates per grid cell, not the gap
+     -- between cells, so the real 700m spread is enforced afterwards in JS
+     -- (see REACH_SPREAD_METERS above); this over-fetches past the eventual
+     -- 10 so that greedy thinning still has enough candidates left to pick
+     -- 10 mutually-distant ones from.
+     spread AS (
+       SELECT DISTINCT ON (ST_SnapToGrid(c.geom, $6))
+              c.geom, s.score, s.layers
+         FROM scored s
+         JOIN ${DEFAULT_SCHEMA}.reach_cells c ON c.id = s.cell_id
+        ORDER BY ST_SnapToGrid(c.geom, $6), s.score DESC
+     )
+     SELECT ROUND(ST_Y(geom)::numeric, 6)::double precision AS lat,
+            ROUND(ST_X(geom)::numeric, 6)::double precision AS lon,
+            ROUND(score::numeric, 4)::double precision AS score,
+            layers
+       FROM spread
+      ORDER BY score DESC
+      LIMIT 200`,
+    [layers, weights, REACH_DECAY_SECONDS, totalWeight, profile, REACH_SPREAD_DEGREES]
+  );
+
+  // Greedy by score: r.rows is already ordered descending, so the first
+  // accepted cell is always the best-scoring one, and every later accept is
+  // the best-scoring cell that doesn't crowd an earlier pick.
+  const picked: { lat: number; lon: number; score: number; layers: Record<string, number> }[] = [];
+  for (const row of r.rows) {
+    const tooClose = picked.some(
+      (p) => haversineM(p.lat, p.lon, row.lat, row.lon) < REACH_SPREAD_METERS
+    );
+    if (tooClose) continue;
+    picked.push(row);
+    if (picked.length === 10) break;
+  }
+
+  const body = {
+    available: true as const,
+    cells: picked.map((row) => ({
+      lat: row.lat,
+      lon: row.lon,
+      score: row.score,
+      // Seconds per requested layer; a layer absent here is a layer this cell
+      // cannot reach within REACH_MAX_SECONDS, which is the point the whole
+      // feature is built to make ("no pharmacy in 30 min").
+      layers: row.layers,
+    })),
+  };
+  // Long TTL: the field only changes on reimport/reload, which the version
+  // prefix above already accounts for — this is not the /api/amenities case
+  // where an expiry is doing real work.
+  await cacheSet(
+    suggestCacheKey(profile, entries),
+    JSON.stringify(body),
+    60 * 60 * 24 * 7
+  );
+  return body;
+};
+
+app.get("/api/suggest", async (req: any, res: any) => {
+  const profile = String(req.query.profile ?? "walk");
+  // REACH_PROFILES, not all of PROFILES: stroller and bike have no
+  // precomputed reach field (layers.ts explains why).
+  if (!(REACH_PROFILES as readonly string[]).includes(profile)) {
+    return res
+      .status(400)
+      .json({ error: `Unknown profile. Try: ${REACH_PROFILES.join(", ")}` });
+  }
+
+  const rawWeights: Record<string, number> = {};
+  const raw = String(req.query.w ?? "").trim();
+  for (const token of raw.split(",").map((t) => t.trim()).filter(Boolean)) {
+    const [layer, wStr] = token.split(":");
+    if (!layer || !Object.prototype.hasOwnProperty.call(REACH_LAYERS, layer)) {
+      return res.status(400).json({
+        error: `Unknown layer in "${token}". Try: ${Object.keys(REACH_LAYERS).join(", ")}`,
+      });
+    }
+    if (!wStr || !/^\d+$/.test(wStr) || parseInt(wStr, 10) > REACH_MAX_WEIGHT) {
+      return res.status(400).json({
+        error: `Weight in "${token}" must be an integer 0..${REACH_MAX_WEIGHT}`,
+      });
+    }
+    // Last one wins on a repeated layer rather than double-joining it below
+    // and silently doubling its weight.
+    rawWeights[layer] = parseInt(wStr, 10);
+  }
+
+  const entries = normalizeWeights(rawWeights);
+  if (!entries.length) {
+    return res.status(400).json({
+      error: "Need at least one layer with a non-zero weight, e.g. w=groceries:3",
+    });
+  }
+
+  // No `limit` param: it would multiply the 324-answer cache space by however
+  // many values callers invent, for no user-visible gain. Fixed at 10 inside
+  // scoreSuggestions.
+  const key = suggestCacheKey(profile, entries);
+  const cached = await cacheGet(key);
+  if (cached) {
+    cacheHits++;
+    return res.json(JSON.parse(cached as string));
+  }
+  cacheMisses++;
+
+  try {
+    res.json(await scoreSuggestions(profile, entries));
+  } catch (err) {
+    console.error("❌ suggest error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 app.get("/api/isochrone", async (req: any, res: any) => {
   const start = Date.now();
   const { lat, lon, minutes } = req.query;
@@ -1510,8 +1720,99 @@ if (fs.existsSync(uiDist)) {
   console.log(`📦 Serving UI from ${uiDist}`);
 }
 
+// --- suggestion cache warm pass (T-016) -------------------------------------
+// The questionnaire (isochrone-ui/MapView.tsx) is six fixed-choice questions
+// with 3 x 2 x 2 x 3 x 3 x 3 = 324 possible answers, so the whole answer space
+// is enumerable — kept here as a literal table rather than imported from the
+// UI, since the two only have to agree on the *answer space*, not on copy or
+// option order. A slider-based questionnaire would make this key space
+// unbounded, which is a second, independent reason (besides ADR-0014's
+// geocode rate gate) the questionnaire stays fixed-choice rather than
+// continuous.
+const Q_MOVING = [
+  {},
+  { kindergarten: 3, playground: 2 },
+  { school: 3, playground: 2 },
+] as const;
+const Q_MOBILITY = REACH_PROFILES;
+const Q_GROCERIES = [{ groceries: 3 }, { groceries: 1 }] as const;
+const Q_HEALTH = [{ health: 3 }, { health: 1 }, { health: 0 }] as const;
+const Q_GREENSPACE = [{ greenspace: 3 }, { greenspace: 1 }, { greenspace: 0 }] as const;
+const Q_DINING = [{ dining: 3 }, { dining: 1 }, { dining: 0 }] as const;
+
+const WARM_ANSWERS: { profile: string; weights: Record<string, number> }[] = [];
+for (const moving of Q_MOVING) {
+  for (const profile of Q_MOBILITY) {
+    for (const groceries of Q_GROCERIES) {
+      for (const health of Q_HEALTH) {
+        for (const greenspace of Q_GREENSPACE) {
+          for (const dining of Q_DINING) {
+            WARM_ANSWERS.push({
+              profile,
+              weights: { ...moving, ...groceries, ...health, ...greenspace, ...dining },
+            });
+          }
+        }
+      }
+    }
+  }
+}
+
+// Guards against overlap with itself, not with drainQueue/sweepPois — nothing
+// else calls scoreSuggestions in a loop. Serial and awaited on purpose: this
+// is a 2-vCPU box, and 324 concurrent aggregates would compete for exactly
+// the postgres connections real traffic needs.
+let warmingInFlight = false;
+const warmSuggestCache = async () => {
+  if (warmingInFlight) return;
+  warmingInFlight = true;
+  try {
+    let hasRows = false;
+    try {
+      const has = await pool.query(
+        `SELECT EXISTS (SELECT 1 FROM ${DEFAULT_SCHEMA}.reach LIMIT 1) AS has_rows`
+      );
+      hasRows = has.rows[0].has_rows;
+    } catch (err) {
+      if ((err as any).code !== "42P01") throw err;
+    }
+    if (!hasRows) {
+      console.log(
+        `ℹ️ ${DEFAULT_SCHEMA}.reach is empty; skipping the suggestion cache warm pass`
+      );
+      // ponytail: one-shot at startup, no periodic recheck. The precompute is
+      // an offline artifact loaded once, and the process restarts after it
+      // lands (same deploy step as any other schema change) — add a recheck
+      // loop only if that assumption stops holding.
+      return;
+    }
+    const start = Date.now();
+    console.log(`🔥 warming ${WARM_ANSWERS.length} suggestion answer sets...`);
+    for (const answer of WARM_ANSWERS) {
+      const entries = normalizeWeights(answer.weights);
+      if (!entries.length) continue; // no combination above produces this; kept defensive
+      try {
+        await scoreSuggestions(answer.profile, entries);
+      } catch (err) {
+        console.error(
+          `⚠️ suggest warm pass: ${suggestCacheKey(answer.profile, entries)} failed:`,
+          (err as Error).message
+        );
+      }
+    }
+    console.log(
+      `🔥 suggest warm pass done: ${WARM_ANSWERS.length} answer sets in ${
+        Date.now() - start
+      }ms`
+    );
+  } finally {
+    warmingInFlight = false;
+  }
+};
+
 ensureAreasTable()
   .then(drainQueue)
+  .then(warmSuggestCache)
   .catch((err) =>
     console.error("⚠️ could not ensure areas table:", (err as Error).message)
   );

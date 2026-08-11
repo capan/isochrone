@@ -306,3 +306,25 @@ a { color: #2a63b5; }
 
 @keyframes chat-blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
 .chat-cursor { animation: chat-blink 1s step-end infinite; }
+
+/* "Where should I live" questionnaire (T-016). Sits between the ramp and
+   the places section; class names follow the existing places/place-list
+   naming so the panel reads as part of the same family, not a bolt-on. */
+.suggest { border-top: 1px solid #eceef1; padding-top: 12px; margin-bottom: 14px; }
+.suggest-honesty { margin-top: 4px; font-size: 11.5px; }
+
+.suggest-q { margin-top: 10px; }
+.suggest-q-label { font: 600 12px system-ui; color: #33383d; margin-bottom: 4px; }
+/* .seg already carries the segmented-button chrome (index.css); reused as-is
+   for each question's options, not restyled here. */
+
+.suggest-results { margin-top: 10px; border-top: 1px solid #eceef1; padding-top: 4px; }
+.suggest-rank {
+  min-width: 26px;
+  color: #7c4dff; /* the "recently added / mine" accent, reused for rank */
+}
+.suggest-layers { display: flex; flex-wrap: wrap; gap: 4px 8px; font-size: 11px; }
+.suggest-layer { color: #8b929a; }
+/* The negative signal — "no pharmacy in 30 min" — is the strongest claim the
+   feature makes, so it is not styled to disappear: red, not grey. */
+.suggest-miss { color: #b3261e; }
