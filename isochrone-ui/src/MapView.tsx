@@ -203,10 +203,13 @@ type SuggestCell = {
 };
 
 // Five questions set weights; the answers are typed as a closed union each,
-// which is what keeps the 324-combination answer space closed (T-016) — a
-// free-text or numeric answer here would blow that open again.
+// which is what keeps the answer space closed — 4·3·2·3·3·3 = 648 sets once
+// T-017 added the dog household option and the cycling profile, up from T-016's
+// 324. That closure is what lets the backend warm every possible answer into
+// redis at startup; a free-text or numeric answer here would blow it open and
+// take the warm pass with it.
 type SuggestAnswers = {
-  household: "alone" | "kids_u6" | "kids_school";
+  household: "alone" | "kids_u6" | "kids_school" | "with_dog";
   groceries: "often" | "weekly";
   health: "important" | "nice" | "not";
   green: "lot" | "some" | "not";
@@ -235,14 +238,15 @@ type MobilityQuestion = {
   id: "mobility";
   kind: "profile";
   label: string;
-  options: { value: "walk" | "wheelchair"; label: string }[];
+  options: { value: "walk" | "wheelchair" | "bike"; label: string }[];
 };
 type SuggestQuestion = WeightQuestion | MobilityQuestion;
 
 // One table drives both the buttons and the weight vector sent to
 // /api/suggest, so the two can't drift. "mobility" is the exception: it picks
 // `profile`, not a weight — wheelchair is a different graph traversal (stairs
-// impassable), not a taste to be scored, so it never enters the weight sum.
+// impassable) and bike a faster one, neither a taste to be scored, so neither
+// enters the weight sum.
 const SUGGEST_QUESTIONS: SuggestQuestion[] = [
   {
     id: "household",
@@ -260,6 +264,15 @@ const SUGGEST_QUESTIONS: SuggestQuestion[] = [
         label: "With school-age kids",
         weights: { school: 3, playground: 2 },
       },
+      // Not a dog layer — 71 dog parks across Berlin is too sparse to carry
+      // one (T-017). A dog's daily need is green space, which already has a
+      // question and a layer, so this option just aims that dial at max and
+      // says so in the UI (see the "with a dog" note in the modal).
+      {
+        value: "with_dog",
+        label: "With a dog",
+        weights: { greenspace: 3 },
+      },
     ],
   },
   {
@@ -269,6 +282,7 @@ const SUGGEST_QUESTIONS: SuggestQuestion[] = [
     options: [
       { value: "walk", label: "Walking" },
       { value: "wheelchair", label: "Wheelchair" },
+      { value: "bike", label: "Cycling" },
     ],
   },
   {
@@ -315,6 +329,11 @@ const SUGGEST_QUESTIONS: SuggestQuestion[] = [
 // Groceries always carries a non-zero weight (3 or 1, never 0 — the question
 // has no "not really" option), so sum(w) can never be zero and the backend's
 // score = sum(w_i * layer_i) / sum(w_i) never divides by it.
+//
+// Max, not last-write: "with a dog" (household) and the green space question
+// can both set `greenspace`, and Object.assign would just let question order
+// decide, silently dropping the dog's request whenever green space happened
+// to be answered afterwards with a lower value. The higher ask always wins.
 const buildSuggestWeights = (
   answers: SuggestAnswers
 ): Partial<Record<ReachLayer, number>> => {
@@ -322,7 +341,10 @@ const buildSuggestWeights = (
   for (const q of SUGGEST_QUESTIONS) {
     if (q.kind !== "weight") continue;
     const opt = q.options.find((o) => o.value === answers[q.id]);
-    if (opt) Object.assign(w, opt.weights);
+    if (!opt) continue;
+    for (const [k, v] of Object.entries(opt.weights) as [ReachLayer, number][]) {
+      w[k] = Math.max(w[k] ?? 0, v);
+    }
   }
   return w;
 };
@@ -436,17 +458,36 @@ export default function MapView() {
   // "Where should I live" questionnaire. One state object for the five
   // weight-bearing answers (mirrors the `jobs`/`caps` grouping already used
   // here), profile kept separate since it also drives the isochrone picker
-  // vocabulary ("walk"/"wheelchair" only — no stroller/bike for suggestions,
-  // per T-016).
+  // vocabulary — walk, wheelchair or (T-017) bike.
+  //
+  // `suggestAnswers`/`suggestProfile` are the *committed* answer set: the one
+  // the map is drawn from. The modal (T-017) edits a separate draft copy and
+  // only writes back on "Show me" — closing by Escape or the backdrop must
+  // discard in-progress edits, not redraw the map with them.
   const [suggestAnswers, setSuggestAnswers] = useState<SuggestAnswers>(
     DEFAULT_SUGGEST_ANSWERS
   );
-  const [suggestProfile, setSuggestProfile] = useState<"walk" | "wheelchair">(
-    "walk"
-  );
+  const [suggestProfile, setSuggestProfile] = useState<
+    "walk" | "wheelchair" | "bike"
+  >("walk");
+  const [suggestModalOpen, setSuggestModalOpen] = useState(false);
+  const [draftAnswers, setDraftAnswers] = useState<SuggestAnswers>(suggestAnswers);
+  const [draftProfile, setDraftProfile] = useState<
+    "walk" | "wheelchair" | "bike"
+  >(suggestProfile);
+  // Returns focus to whichever button opened the modal ("Discover…" the first
+  // time, "edit answers" afterwards) — both render into this one ref, never
+  // both at once.
+  const discoverBtnRef = useRef<HTMLButtonElement | null>(null);
+  // Suggestions are now a mode you enter (T-017), not a control that queries
+  // on every render. This stays false until the first "Show me", so the
+  // fetch effect below has something to gate on: mounting must not fire a
+  // request nobody asked for.
+  const suggestAskedRef = useRef(false);
   const [suggestCells, setSuggestCells] = useState<SuggestCell[]>([]);
-  const [suggestState, setSuggestState] =
-    useState<"loading" | "ok" | "empty" | "unavailable" | "error">("loading");
+  const [suggestState, setSuggestState] = useState<
+    "idle" | "loading" | "ok" | "empty" | "unavailable" | "error"
+  >("idle");
   const [suggestReason, setSuggestReason] = useState("");
 
   const closeHelp = () => {
@@ -955,6 +996,34 @@ export default function MapView() {
   };
   focusSuggestionRef.current = focusSuggestion;
 
+  // Opens with a fresh copy of the committed answers, so repeated edit/cancel
+  // cycles can't leak a half-typed draft from a previous open.
+  const openSuggestModal = () => {
+    setDraftAnswers({ ...suggestAnswers });
+    setDraftProfile(suggestProfile);
+    setSuggestModalOpen(true);
+  };
+
+  // Escape / backdrop / × all end here: the draft is simply discarded, and
+  // focus goes back to whichever button opened the modal.
+  const closeSuggestModal = () => {
+    setSuggestModalOpen(false);
+    discoverBtnRef.current?.focus();
+  };
+
+  // "Show me": the only path that commits the draft. Spreading draftAnswers
+  // into a new object guarantees a fresh reference even when nothing in it
+  // changed, so the fetch effect's dependency array always sees a change and
+  // fires — otherwise clicking "Show me" a second time with identical
+  // answers would silently do nothing.
+  const submitSuggest = () => {
+    suggestAskedRef.current = true;
+    setSuggestAnswers({ ...draftAnswers });
+    setSuggestProfile(draftProfile);
+    setSuggestModalOpen(false);
+    discoverBtnRef.current?.focus();
+  };
+
   const runSearch = async (e: FormEvent) => {
     e.preventDefault();
     const q = query.trim();
@@ -1078,7 +1147,12 @@ export default function MapView() {
   // quick succession fire one request, not five. No routing call happens
   // here — this is the whole point of T-016: the field is precomputed, so
   // re-ranking on every answer costs one Postgres aggregate, not a traversal.
+  //
+  // Runs on `suggestAnswers`/`suggestProfile`, the committed values, not the
+  // modal's draft — so this still only fires once per "Show me" (T-017), not
+  // once per button press inside the modal.
   useEffect(() => {
+    if (!suggestAskedRef.current) return; // nobody has clicked "Show me" yet
     const t = setTimeout(() => {
       const w = suggestQueryParam(buildSuggestWeights(suggestAnswers));
       if (!w) return; // groceries always weights >0; defensive only
@@ -1166,6 +1240,16 @@ export default function MapView() {
   const suggestLayers = (Object.keys(currentWeights) as ReachLayer[]).filter(
     (l) => (currentWeights[l] ?? 0) > 0
   );
+
+  // Compact stand-in for the questions once "Show me" has been clicked — the
+  // panel shows what was asked, not the ranked list (T-017: that lives on
+  // the map).
+  const suggestSummary = SUGGEST_QUESTIONS.map((q) => {
+    const value = q.kind === "profile" ? suggestProfile : suggestAnswers[q.id];
+    return q.options.find((o) => o.value === value)?.label;
+  })
+    .filter(Boolean)
+    .join(" · ");
 
   return (
     <div className="app">
@@ -1261,38 +1345,37 @@ export default function MapView() {
               Ranks reachability only — not rent, not noise, not transit.
             </p>
 
-            {suggestState === "unavailable" ? (
-              <p className="muted">
-                {suggestReason ||
-                  "Suggestions are only available for Berlin right now."}
-              </p>
+            {suggestState === "idle" ? (
+              // T-017: no always-visible questionnaire. Suggestions are a
+              // mode you enter, not a control that crowds this panel.
+              <button
+                ref={discoverBtnRef}
+                type="button"
+                className="discover-btn"
+                onClick={openSuggestModal}
+              >
+                Discover suitable living locations in Berlin
+              </button>
             ) : (
               <>
-                {SUGGEST_QUESTIONS.map((q) => (
-                  <div className="suggest-q" key={q.id}>
-                    <div className="suggest-q-label">{q.label}</div>
-                    <div className="seg" role="group" aria-label={q.label}>
-                      {q.options.map((o) => (
-                        <button
-                          key={o.value}
-                          aria-pressed={
-                            q.kind === "profile"
-                              ? suggestProfile === o.value
-                              : suggestAnswers[q.id] === o.value
-                          }
-                          onClick={() =>
-                            q.kind === "profile"
-                              ? setSuggestProfile(o.value as "walk" | "wheelchair")
-                              : setSuggestAnswers((a) => ({ ...a, [q.id]: o.value }))
-                          }
-                        >
-                          {o.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ))}
+                <div className="suggest-summary">
+                  <p className="suggest-summary-text">{suggestSummary}</p>
+                  <button
+                    ref={discoverBtnRef}
+                    type="button"
+                    className="linkish"
+                    onClick={openSuggestModal}
+                  >
+                    edit answers
+                  </button>
+                </div>
 
+                {suggestState === "unavailable" && (
+                  <p className="muted">
+                    {suggestReason ||
+                      "Suggestions are only available for Berlin right now."}
+                  </p>
+                )}
                 {suggestState === "loading" && (
                   <p className="muted">Ranking…</p>
                 )}
@@ -1305,7 +1388,7 @@ export default function MapView() {
                   </p>
                 )}
 
-                {suggestCells.length > 0 && (
+                {suggestState === "ok" && suggestCells.length > 0 && (
                   <ul className="place-list suggest-results">
                     {suggestCells.map((c, i) => (
                       <li key={`${c.lat},${c.lon}`}>
@@ -1540,9 +1623,146 @@ export default function MapView() {
       </div>
 
       {help && <HelpPanel onClose={closeHelp} focus={helpFocus} />}
+      {suggestModalOpen && (
+        <SuggestModal
+          answers={draftAnswers}
+          profile={draftProfile}
+          onAnswer={(id, value) =>
+            setDraftAnswers((a) => ({ ...a, [id]: value }))
+          }
+          onProfile={setDraftProfile}
+          onSubmit={submitSuggest}
+          onClose={closeSuggestModal}
+        />
+      )}
     </div>
   );
 }
+
+// T-017: the questionnaire moved off the always-visible panel and into this
+// modal, opened by the "Discover…" button and closed by "Show me", Escape or
+// the backdrop. It edits a draft only — MapView commits it on submit, so
+// dismissing the modal any other way is a no-op on the map.
+function SuggestModal({
+  answers,
+  profile,
+  onAnswer,
+  onProfile,
+  onSubmit,
+  onClose,
+}: {
+  answers: SuggestAnswers;
+  profile: "walk" | "wheelchair" | "bike";
+  onAnswer: (id: keyof SuggestAnswers, value: string) => void;
+  onProfile: (value: "walk" | "wheelchair" | "bike") => void;
+  onSubmit: () => void;
+  onClose: () => void;
+}) {
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    // Focus moves into the modal on open; MapView returns it to the trigger
+    // button on close (both close paths route through onClose/onSubmit).
+    dialogRef.current?.focus();
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      // Minimal Tab wrap — no focus-trap library — so Tab can't leak past
+      // the modal onto the map hidden behind the backdrop.
+      if (e.key === "Tab" && dialogRef.current) {
+        const focusables = dialogRef.current.querySelectorAll<HTMLElement>(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        );
+        if (!focusables.length) return;
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    // Fixed, full-viewport, above the map's z-index: this is also what stops
+    // the map scrolling or zooming while the modal is open — the backdrop
+    // physically intercepts every pointer and wheel event before Leaflet
+    // ever sees one.
+    <div className="suggest-modal-backdrop" onClick={onClose}>
+      <div
+        className="suggest-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Where should I live?"
+        tabIndex={-1}
+        ref={dialogRef}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="suggest-modal-head">
+          <h2>Where should I live?</h2>
+          <button type="button" aria-label="Close" onClick={onClose}>
+            ×
+          </button>
+        </div>
+        <p className="muted suggest-honesty">
+          Ranks reachability only — not rent, not noise, not transit.
+        </p>
+
+        {SUGGEST_QUESTIONS.map((q) => (
+          <div className="suggest-q" key={q.id}>
+            <div className="suggest-q-label">{q.label}</div>
+            <div className="seg" role="group" aria-label={q.label}>
+              {q.options.map((o) => (
+                <button
+                  key={o.value}
+                  type="button"
+                  aria-pressed={
+                    q.kind === "profile"
+                      ? profile === o.value
+                      : answers[q.id] === o.value
+                  }
+                  onClick={() =>
+                    q.kind === "profile"
+                      ? onProfile(o.value as "walk" | "wheelchair" | "bike")
+                      : onAnswer(q.id, o.value)
+                  }
+                >
+                  {o.label}
+                </button>
+              ))}
+            </div>
+
+            {q.id === "mobility" && profile === "bike" && (
+              <p className="muted suggest-note">
+                Bike ignores one-way streets, so results are slightly
+                optimistic on contraflow.
+              </p>
+            )}
+            {q.id === "household" && answers.household === "with_dog" && (
+              <p className="muted suggest-note">
+                read as: green space matters a lot
+              </p>
+            )}
+          </div>
+        ))}
+
+        <button type="button" className="suggest-submit" onClick={onSubmit}>
+          Show me
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // Simple debounce utility
 function debounce(fn: (...args: any[]) => void, delay: number) {
   let timeout: ReturnType<typeof setTimeout>;

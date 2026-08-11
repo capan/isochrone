@@ -28,19 +28,37 @@ export const REACH_LAYERS = {
 
 export type ReachLayer = keyof typeof REACH_LAYERS;
 
-// Only two. `stroller`'s speed factors are uncalibrated estimates and must not
-// be published as if measured; `bike` answers a different question than "what
-// is my daily life within walking distance".
-export const REACH_PROFILES = ["walk", "wheelchair"] as const;
+// `stroller` is absent on purpose: its speed factors are uncalibrated estimates
+// and must not be published as if measured.
+export const REACH_PROFILES = ["walk", "wheelchair", "bike"] as const;
 
-// Beyond half an hour on foot nobody is choosing a flat on the strength of it,
-// and the cap is what keeps the table to one row per *reachable* cell/layer.
-export const REACH_MAX_SECONDS = 1800;
+export type ReachProfile = (typeof REACH_PROFILES)[number];
 
-// The reference walk a layer score decays to zero over. Deliberately shorter
-// than REACH_MAX_SECONDS: a 28-minute supermarket should score ~0 without being
-// indistinguishable from unreachable.
-export const REACH_DECAY_SECONDS = 900;
+// A profile is not just which field you read — it changes what "close" MEANS,
+// and both numbers below have to move with it.
+//
+// The cap keeps the table to one row per *reachable* cell/layer: beyond it,
+// absence is the answer. The decay is where a layer's score reaches zero, and is
+// deliberately shorter than the cap so a 28-minute supermarket scores ~0 without
+// being indistinguishable from no supermarket at all.
+//
+// Why bike is 600s and not 1800s: at 4.2 m/s a 1800s cap is a 7.5km radius and a
+// 900s decay puts zero at 3.8km. Almost every cell in inner Berlin is within
+// 3.8km of a supermarket, so every layer would score ~1, the scores would
+// compress and the ranking would be noise. 600s lands bike on the same 2.5km
+// footprint as walking — selective, and costing about the same to traverse
+// because it explores the same area rather than 9x of it.
+export const REACH_CAP_SECONDS: Record<ReachProfile, number> = {
+  walk: 1800, //       2.5 km at 1.4 m/s
+  wheelchair: 1800, // 1.6 km at 0.9 m/s
+  bike: 600, //        2.5 km at 4.2 m/s
+};
+
+export const REACH_DECAY_SECONDS: Record<ReachProfile, number> = {
+  walk: 900,
+  wheelchair: 900,
+  bike: 300,
+};
 
 // Same grid the POI dedup already snaps to (index.ts, ST_SnapToGrid 0.0006):
 // ~41m x 67m at 52.5°N. Measured 134,280 cells for Berlin's 618,345
@@ -62,7 +80,8 @@ export const REACH_SPREAD_METERS = 700;
 export const REACH_SPREAD_DEGREES = 0.01;
 
 // Weights are answers to questions, not free parameters: a closed 0..3 range is
-// what keeps the whole answer space enumerable (324 combinations), which is
+// what keeps the whole answer space enumerable (648 combinations since T-017
+// added the dog household option and the bike profile; 324 before), which is
 // what makes warming the cache to 100% possible.
 export const REACH_MAX_WEIGHT = 3;
 

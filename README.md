@@ -105,7 +105,7 @@ To generate live "where should I live" suggestions, precompute the reach field
 
     cd scripts && node --loader ts-node/esm precompute-reach.ts
 
-The precompute is off-box, unattended, takes ~9 hours for Berlin, and is
+The precompute is off-box, unattended, takes ~13.5 hours for Berlin, and is
 resumable. It must **never** run against production — pgRouting's C loops ignore
 cancellation, so only `pg_terminate_backend` can stop a runaway traversal.
 

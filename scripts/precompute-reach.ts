@@ -2,10 +2,12 @@
 //
 // Offline batch job for T-016 ("where should I live"). Fills
 // <schema>.reach_cells and <schema>.reach: for every grid cell, the seconds
-// to the nearest place in each of the 7 REACH_LAYERS, for each of the 2
-// REACH_PROFILES (14 traversals total). See
+// to the nearest place in each of the 7 REACH_LAYERS, for each of the 3
+// REACH_PROFILES (21 traversals total). See
 // tickets/todo/T-016-livability-suggestions.md for the design and the
-// measurements this script is built around.
+// measurements this script is built around, and
+// tickets/todo/T-017-bike-modal-dog.md for why the traversal cap is now
+// per-profile rather than a single constant.
 //
 // DO NOT RUN THIS AGAINST PRODUCTION, OR ANY LIVE DATABASE. A full-city
 // pgr_drivingDistance did not finish in 10 minutes when measured against prod
@@ -17,9 +19,14 @@
 // lands minutes late. Run this against a copy of the database on a machine
 // that is not serving traffic.
 //
-// Expected runtime: 14 traversals at ~10-60 minutes each (graph-size bound,
-// not source-count bound — nearest-of-N costs the same as nearest-of-one,
-// see the super-source trick below) — a few hours, unattended, on a laptop.
+// Expected runtime: 21 traversals at ~39 minutes each measured (graph-size
+// bound, not source-count bound — nearest-of-N costs the same as
+// nearest-of-one, see the super-source trick below) — ~13.5 hours total,
+// up from ~9h for the 14 walk/wheelchair-only traversals, unattended, on a
+// laptop. The bike traversal costs about the same as walk per pair despite
+// the higher speed, because its cap is chosen to explore the same ~2.5km
+// footprint (see REACH_CAP_SECONDS in layers.ts) rather than several times
+// more of the graph.
 // Idempotent and resumable: an operator can lose the ssh session and rerun
 // the identical command; already-complete (layer, profile) pairs are
 // skipped, not recomputed (see "resumability" below).
@@ -42,6 +49,9 @@
 import { Pool, PoolClient } from "pg";
 import { createRequire } from "node:module";
 import path from "node:path";
+// Type-only: erased at compile time, so it does not hit the runtime
+// ESM<->CJS interop problem the require() below exists to route around.
+import type { ReachProfile } from "../isochrone-backend/layers";
 
 // scripts/ is an ESM package (package.json "type":"module"); isochrone-backend/
 // compiles to CommonJS. A static `import` of layers.ts across that boundary hits
@@ -58,19 +68,13 @@ const layers = req("../isochrone-backend/layers") as typeof import("../isochrone
 const {
   REACH_LAYERS,
   REACH_PROFILES,
-  REACH_MAX_SECONDS,
+  REACH_CAP_SECONDS,
   REACH_CELL_DEGREES,
   costExpr,
 } = layers;
 type ReachLayer = keyof typeof REACH_LAYERS;
 
 const SCHEMA = process.env.SCHEMA ?? "berlin";
-
-// costExpr() takes the wider ProfileName (walk/stroller/wheelchair/bike, from
-// PROFILES); REACH_PROFILES is the narrower walk/wheelchair-only pair this
-// script actually loops over. Named here so runTraversal can pass it straight
-// through without a cast.
-type ReachProfile = (typeof REACH_PROFILES)[number];
 
 const pool = new Pool({
   host: process.env.PGHOST ?? "127.0.0.1",
@@ -94,10 +98,11 @@ const SUPER_SOURCE = 2_000_000_000;
 const elapsed = (t0: number) => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
 
 async function ensureTables(client: PoolClient) {
-  // Matches the ticket's DDL exactly. Added here rather than to index.ts's
-  // startup block because that file is being edited by another change right
-  // now; whichever lands second should fold this into that block so a fresh
-  // stack gets the tables empty rather than missing (T-016's own instruction).
+  // Deliberately duplicated with index.ts's startup block, not left to it: an
+  // operator runs this against a fresh restore on a machine where the app has
+  // never started, so the tables may genuinely not exist yet. Both sides are
+  // CREATE ... IF NOT EXISTS and must stay byte-identical in shape — if they
+  // ever disagree, the traversal writes rows the endpoint cannot read.
   await client.query(`
     CREATE TABLE IF NOT EXISTS ${SCHEMA}.reach_cells (
       id   serial PRIMARY KEY,
@@ -126,7 +131,7 @@ async function populateReachCells(client: PoolClient) {
     // reach_cells by re-running the identical snap and comparing for equality,
     // so a changed constant matches nothing, commits a near-empty row set, and
     // combinationDone then marks the pair complete — a silent partial result at
-    // hour 8 of a 9-hour run, which is the worst way to find out.
+    // hour 12 of a 13.5-hour run, which is the worst way to find out.
     const {
       rows: [{ n: expected }],
     } = await client.query<{ n: number }>(
@@ -232,7 +237,7 @@ async function runTraversal(
 ): Promise<number> {
   console.log(
     `${layer}/${profile}: starting pgr_drivingDistance from the virtual super-source ` +
-      `(cap ${REACH_MAX_SECONDS}s). This is the step that can run long — a full-city ` +
+      `(cap ${REACH_CAP_SECONDS[profile]}s). This is the step that can run long — a full-city ` +
       `traversal did not finish in 10 minutes when measured. statement_timeout will not ` +
       `help; only pg_terminate_backend can stop it.`
   );
@@ -262,7 +267,7 @@ async function runTraversal(
                      UNION ALL
                     SELECT ${SUPER_SOURCE} + row_number() OVER (), ${SUPER_SOURCE}, vid, 0, 0
                       FROM src$$,
-                  ${SUPER_SOURCE}, ${REACH_MAX_SECONDS}, false
+                  ${SUPER_SOURCE}, ${REACH_CAP_SECONDS[profile]}, false
                 ) dd
            JOIN ${SCHEMA}.ways_vertices_pgr v ON v.id = dd.node
            JOIN ${SCHEMA}.reach_cells rc ON rc.geom = ST_SnapToGrid(v.geom, ${REACH_CELL_DEGREES})

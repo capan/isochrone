@@ -13,6 +13,7 @@ import {
   REACH_LAYERS,
   REACH_PROFILES,
   REACH_DECAY_SECONDS,
+  ReachProfile,
   REACH_SPREAD_DEGREES,
   REACH_SPREAD_METERS,
   REACH_MAX_WEIGHT,
@@ -1322,11 +1323,16 @@ const normalizeWeights = (weights: Record<string, number>): [string, number][] =
     .filter(([, w]) => w > 0)
     .sort(([a], [b]) => a.localeCompare(b));
 
-// suggest1: bump this prefix whenever DEFAULT_SCHEMA.reach is reloaded with a
-// different shape, or the score formula below changes — same precedent as
-// poi2 above (/api/amenities).
+// suggest2: bumped from suggest1 for T-017 — the decay went from a single
+// REACH_DECAY_SECONDS to a per-profile lookup (bike scores on 300s, not
+// 900s) and the answer space grew from 324 to 648, so both the scoring
+// formula and the key space changed. Bump this prefix whenever
+// DEFAULT_SCHEMA.reach is reloaded with a different shape, or the score
+// formula below changes — same precedent as poi2 above (/api/amenities).
+// T-016's verification lost half an hour to stale entries under an
+// unchanged prefix; do not repeat that.
 const suggestCacheKey = (profile: string, entries: [string, number][]) =>
-  `suggest1:${profile}:${entries.map(([l, w]) => `${l}:${w}`).join(",")}`;
+  `suggest2:${profile}:${entries.map(([l, w]) => `${l}:${w}`).join(",")}`;
 
 // ST_SnapToGrid guarantees at most one candidate per coarse cell but nothing
 // about the gap BETWEEN cells — two candidates straddling a grid boundary can
@@ -1377,14 +1383,20 @@ const scoreSuggestions = async (profile: string, entries: [string, number][]) =>
     };
   }
 
-  // layer_score = 0 at REACH_DECAY_SECONDS, 1 at 0s; GREATEST clamps a walk
-  // past the decay window rather than letting it go negative. A missing row
-  // never gets joined, which is the "no pharmacy within reach" signal falling
-  // out of the LEFT-JOIN-shaped absence for free (the join below is an inner
-  // join for exactly this reason — a row that never matches contributes 0 by
-  // not existing, same result, one fewer NULL to coalesce).
+  // layer_score = 0 at REACH_DECAY_SECONDS[profile], 1 at 0s; GREATEST clamps
+  // a walk past the decay window rather than letting it go negative. A
+  // missing row never gets joined, which is the "no pharmacy within reach"
+  // signal falling out of the LEFT-JOIN-shaped absence for free (the join
+  // below is an inner join for exactly this reason — a row that never
+  // matches contributes 0 by not existing, same result, one fewer NULL to
+  // coalesce).
+  // The decay is looked up per profile, not a shared constant (T-017): at
+  // 4.2 m/s a 900s decay puts a bike score's zero point at 3.8km, which
+  // covers almost all of inner Berlin and compresses every score to ~1. 300s
+  // is what keeps bike selective (see layers.ts).
   // totalWeight is constant across every row this query returns, so it is a
   // bind parameter computed once in JS rather than recomputed per cell.
+  const decaySeconds = REACH_DECAY_SECONDS[profile as ReachProfile];
   const r = await pool.query(
     `WITH weights(layer, w) AS (
        SELECT unnest($1::text[]), unnest($2::int[])
@@ -1409,16 +1421,22 @@ const scoreSuggestions = async (profile: string, entries: [string, number][]) =>
               c.geom, s.score, s.layers
          FROM scored s
          JOIN ${DEFAULT_SCHEMA}.reach_cells c ON c.id = s.cell_id
-        ORDER BY ST_SnapToGrid(c.geom, $6), s.score DESC
+        -- Coordinates break score ties on purpose. A single-layer weight vector
+        -- (reachable from the questionnaire: groceries:1 and every other answer
+        -- at zero) puts every cell collocated with a shop at exactly 1.0 — 37 of
+        -- them for groceries in Berlin — and an unordered tie means the same
+        -- question can answer differently after a restart, with the cache then
+        -- freezing whichever order that run happened to produce.
+        ORDER BY ST_SnapToGrid(c.geom, $6), s.score DESC, ST_Y(c.geom), ST_X(c.geom)
      )
      SELECT ROUND(ST_Y(geom)::numeric, 6)::double precision AS lat,
             ROUND(ST_X(geom)::numeric, 6)::double precision AS lon,
             ROUND(score::numeric, 4)::double precision AS score,
             layers
        FROM spread
-      ORDER BY score DESC
+      ORDER BY score DESC, lat, lon
       LIMIT 200`,
-    [layers, weights, REACH_DECAY_SECONDS, totalWeight, profile, REACH_SPREAD_DEGREES]
+    [layers, weights, decaySeconds, totalWeight, profile, REACH_SPREAD_DEGREES]
   );
 
   // Greedy by score: r.rows is already ordered descending, so the first
@@ -1441,8 +1459,8 @@ const scoreSuggestions = async (profile: string, entries: [string, number][]) =>
       lon: row.lon,
       score: row.score,
       // Seconds per requested layer; a layer absent here is a layer this cell
-      // cannot reach within REACH_MAX_SECONDS, which is the point the whole
-      // feature is built to make ("no pharmacy in 30 min").
+      // cannot reach within REACH_CAP_SECONDS[profile], which is the point the
+      // whole feature is built to make ("no pharmacy in 30 min").
       layers: row.layers,
     })),
   };
@@ -1493,7 +1511,7 @@ app.get("/api/suggest", async (req: any, res: any) => {
     });
   }
 
-  // No `limit` param: it would multiply the 324-answer cache space by however
+  // No `limit` param: it would multiply the 648-answer cache space by however
   // many values callers invent, for no user-visible gain. Fixed at 10 inside
   // scoreSuggestions.
   const key = suggestCacheKey(profile, entries);
@@ -1720,25 +1738,60 @@ if (fs.existsSync(uiDist)) {
   console.log(`📦 Serving UI from ${uiDist}`);
 }
 
-// --- suggestion cache warm pass (T-016) -------------------------------------
+// --- suggestion cache warm pass (T-016, extended T-017) ---------------------
 // The questionnaire (isochrone-ui/MapView.tsx) is six fixed-choice questions
-// with 3 x 2 x 2 x 3 x 3 x 3 = 324 possible answers, so the whole answer space
+// with 4 x 3 x 2 x 3 x 3 x 3 = 648 possible answers, so the whole answer space
 // is enumerable — kept here as a literal table rather than imported from the
 // UI, since the two only have to agree on the *answer space*, not on copy or
 // option order. A slider-based questionnaire would make this key space
 // unbounded, which is a second, independent reason (besides ADR-0014's
 // geocode rate gate) the questionnaire stays fixed-choice rather than
 // continuous.
+//
+// T-017 grew this from 324: "Who's moving?" gained a fourth option ("with a
+// dog", below) and mobility gained cycling (REACH_PROFILES growing to 3 in
+// layers.ts already does that half for free).
+//
+// The dog option is not a new layer — it sets greenspace to weight 3. The
+// green space question can also set greenspace, independently, so the two
+// answers are merged by MAX below, not last-write — mirrors
+// buildSuggestWeights in isochrone-ui/src/MapView.tsx, which merges the same
+// way for the same reason: household=dog + greenspace="not much" must still
+// warm `greenspace:3`, because that's the w= string the UI actually sends
+// (max(3, 0)), not `greenspace:0`. Object spread here would drop the dog's
+// ask whenever the green space question's answer landed later in the merge
+// order, warming a key no real request constructs. See T-017 ticket for why
+// dog_park/vet/pet POIs are too sparse to carry their own layer.
+//
+// This is a mirrored rule, not a shared function: the UI bundle deliberately
+// does not import backend modules (it keeps its own literal ReachLayer
+// union for the same reason), so buildSuggestWeights and the merge below
+// must be kept in agreement by hand. T-012 is the scar from exactly this
+// kind of pair drifting silently — if you change one, change the other.
 const Q_MOVING = [
   {},
   { kindergarten: 3, playground: 2 },
   { school: 3, playground: 2 },
+  { greenspace: 3 }, // "with a dog"
 ] as const;
 const Q_MOBILITY = REACH_PROFILES;
 const Q_GROCERIES = [{ groceries: 3 }, { groceries: 1 }] as const;
 const Q_HEALTH = [{ health: 3 }, { health: 1 }, { health: 0 }] as const;
 const Q_GREENSPACE = [{ greenspace: 3 }, { greenspace: 1 }, { greenspace: 0 }] as const;
 const Q_DINING = [{ dining: 3 }, { dining: 1 }, { dining: 0 }] as const;
+
+// Mirrors buildSuggestWeights' merge in MapView.tsx (comment above explains
+// why it's mirrored rather than shared): the higher ask always wins when two
+// questions write the same layer, rather than whichever was spread last.
+const mergeWeightsMax = (
+  ...parts: readonly Partial<Record<string, number>>[]
+): Record<string, number> => {
+  const w: Record<string, number> = {};
+  for (const part of parts) {
+    for (const [k, v] of Object.entries(part)) w[k] = Math.max(w[k] ?? 0, v ?? 0);
+  }
+  return w;
+};
 
 const WARM_ANSWERS: { profile: string; weights: Record<string, number> }[] = [];
 for (const moving of Q_MOVING) {
@@ -1749,7 +1802,7 @@ for (const moving of Q_MOVING) {
           for (const dining of Q_DINING) {
             WARM_ANSWERS.push({
               profile,
-              weights: { ...moving, ...groceries, ...health, ...greenspace, ...dining },
+              weights: mergeWeightsMax(moving, groceries, health, greenspace, dining),
             });
           }
         }
@@ -1760,7 +1813,7 @@ for (const moving of Q_MOVING) {
 
 // Guards against overlap with itself, not with drainQueue/sweepPois — nothing
 // else calls scoreSuggestions in a loop. Serial and awaited on purpose: this
-// is a 2-vCPU box, and 324 concurrent aggregates would compete for exactly
+// is a 2-vCPU box, and 648 concurrent aggregates would compete for exactly
 // the postgres connections real traffic needs.
 let warmingInFlight = false;
 const warmSuggestCache = async () => {

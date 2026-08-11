@@ -127,31 +127,33 @@ const suggest = async (params) => {
   );
 }
 
-// 7. Negative signal: greenspace layer (no rows in seeded field) is omitted from results
+// 7. Negative signal: bike/school pair (deliberately absent from precomputed field)
+//    is omitted from results. Mirrors the genuine fixture halfway through a 13.5h
+//    precompute. All other profile/layer pairs are populated.
 {
-  const res = await suggest({ profile: "walk", w: "groceries:2,greenspace:2" });
+  const res = await suggest({ profile: "bike", w: "school:3,groceries:1" });
   check(
     res.status === 200,
-    "request with unavailable layer (greenspace) succeeds",
+    "request with unavailable profile/layer pair (bike+school) succeeds",
     `HTTP ${res.status}`
   );
   if (res.body.cells) {
-    let greenspaceAbsent = true;
+    let schoolAbsent = true;
     for (const cell of res.body.cells) {
-      if ("greenspace" in cell.layers) {
-        greenspaceAbsent = false;
+      if ("school" in cell.layers) {
+        schoolAbsent = false;
         break;
       }
     }
     check(
-      greenspaceAbsent,
-      "greenspace is absent from all cell layers",
-      greenspaceAbsent ? "✓" : "found in at least one cell"
+      schoolAbsent,
+      "school is absent from all bike result layers (fixture gap)",
+      schoolAbsent ? "✓" : "found in at least one cell"
     );
   }
 }
 
-// 8. Profile handling: wheelchair succeeds, stroller and bike return 400
+// 8. Profile handling: walk, wheelchair, and bike succeed; stroller returns 400
 {
   const wheelchair = await suggest({ profile: "wheelchair", w: "groceries:2" });
   check(
@@ -160,15 +162,19 @@ const suggest = async (params) => {
     `HTTP ${wheelchair.status}`
   );
 
+  const bike = await suggest({ profile: "bike", w: "groceries:2" });
+  check(
+    bike.status === 200,
+    "profile=bike succeeds",
+    `HTTP ${bike.status}`
+  );
+
   const stroller = await suggest({ profile: "stroller", w: "groceries:2" });
   check(
     stroller.status === 400,
     "profile=stroller returns 400",
     `HTTP ${stroller.status}`
   );
-
-  const bike = await suggest({ profile: "bike", w: "groceries:2" });
-  check(bike.status === 400, "profile=bike returns 400", `HTTP ${bike.status}`);
 }
 
 // 9. 400 errors with error message
@@ -212,6 +218,15 @@ const suggest = async (params) => {
     "missing w parameter returns 400 with error",
     `${noW.status} ${noW.body.error?.slice(0, 40) ?? ""}`
   );
+
+  // Invalid profile (stroller) lists valid profiles in error message
+  const badProfile = await suggest({ profile: "stroller", w: "groceries:1" });
+  const hasValidProfiles = badProfile.body.error?.includes("walk") && badProfile.body.error?.includes("wheelchair") && badProfile.body.error?.includes("bike");
+  check(
+    badProfile.status === 400 && hasValidProfiles,
+    "invalid profile error lists valid profiles (walk, wheelchair, bike)",
+    hasValidProfiles ? "✓" : `${badProfile.body.error?.slice(0, 60) ?? "no error"}`
+  );
 }
 
 // 10. Caching: same URL twice returns identical JSON
@@ -223,5 +238,103 @@ const suggest = async (params) => {
   check(same, "same request returns identical JSON (cached)", same ? "✓" : "responses differ");
 }
 
-console.log(`\n${10 - failed}/${10}`);
+// 11. Bike profile basic: returns 200, available=true, has cells
+{
+  const res = await suggest({ profile: "bike", w: "groceries:3,health:2,school:1" });
+  check(res.status === 200, "bike profile returns 200", `HTTP ${res.status}`);
+  check(res.body.available === true, "bike result has available=true", `available=${res.body.available}`);
+  check(
+    Array.isArray(res.body.cells) && res.body.cells.length > 0,
+    "bike result has non-empty cells array",
+    `${res.body.cells?.length ?? 0} cells`
+  );
+}
+
+// 12. Bike invariants: at most 10 cells, non-increasing scores, 700m spread
+{
+  const res = await suggest({ profile: "bike", w: "groceries:3,health:2" });
+  if (res.body.available && Array.isArray(res.body.cells)) {
+    // Check at most 10 cells
+    check(
+      res.body.cells.length <= 10,
+      "bike result has at most 10 cells",
+      `${res.body.cells.length} cells`
+    );
+
+    // Check scores are non-increasing
+    let sorted = true;
+    for (let i = 1; i < res.body.cells.length; i++) {
+      if (res.body.cells[i].score > res.body.cells[i - 1].score) {
+        sorted = false;
+        break;
+      }
+    }
+    check(sorted, "bike cells sorted by descending score");
+
+    // Check no two cells within 700m (same logic as test 5)
+    if (res.body.cells.length > 1) {
+      let minDist = Infinity;
+      for (let i = 0; i < res.body.cells.length; i++) {
+        for (let j = i + 1; j < res.body.cells.length; j++) {
+          const d = haversineM(
+            res.body.cells[i].lat,
+            res.body.cells[i].lon,
+            res.body.cells[j].lat,
+            res.body.cells[j].lon
+          );
+          minDist = Math.min(minDist, d);
+        }
+      }
+      const ok = minDist >= 700;
+      check(ok, "bike: no two cells within 700m", `min distance ${minDist.toFixed(0)}m`);
+    }
+  }
+}
+
+// 13. Per-profile decay: bike scores (300s decay) must vary more than walk scores
+//     (900s decay). Without per-profile decay, bike would compress toward 1.0.
+//     For a multi-layer bike vector, score range must be meaningful (use 0.2 as
+//     threshold; tight but loose enough to not be brittle on re-seeds).
+{
+  const res = await suggest({ profile: "bike", w: "groceries:3,health:2,dining:1" });
+  if (res.body.available && Array.isArray(res.body.cells) && res.body.cells.length > 1) {
+    const scores = res.body.cells.map(c => c.score);
+    const minScore = Math.min(...scores);
+    const maxScore = Math.max(...scores);
+    const range = maxScore - minScore;
+    const ok = range >= 0.2;
+    check(
+      ok,
+      "bike scores span meaningful range (≥0.2), not compressed at 1.0",
+      `range ${(maxScore - minScore).toFixed(3)}, min ${minScore.toFixed(3)}, max ${maxScore.toFixed(3)}`
+    );
+  }
+}
+
+// 14. Tie determinism: same URL returns cells in identical order both times,
+//     especially for single-layer queries (w=groceries:1) that put many cells
+//     at exactly 1.0 and would produce arbitrary ordering without tiebreakers.
+{
+  const params = { profile: "walk", w: "groceries:1" };
+  const res1 = await suggest(params);
+  const res2 = await suggest(params);
+
+  if (res1.body.cells && res2.body.cells && res1.body.cells.length === res2.body.cells.length) {
+    let sameOrder = true;
+    for (let i = 0; i < res1.body.cells.length; i++) {
+      if (res1.body.cells[i].lat !== res2.body.cells[i].lat ||
+          res1.body.cells[i].lon !== res2.body.cells[i].lon) {
+        sameOrder = false;
+        break;
+      }
+    }
+    check(
+      sameOrder,
+      "same request returns cells in identical order (tie determinism)",
+      sameOrder ? "✓" : "ordering differs"
+    );
+  }
+}
+
+console.log(`\n${14 - failed}/${14}`);
 process.exit(failed ? 1 : 0);
