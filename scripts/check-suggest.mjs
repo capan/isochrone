@@ -127,28 +127,26 @@ const suggest = async (params) => {
   );
 }
 
-// 7. Negative signal: bike/school pair (deliberately absent from precomputed field)
-//    is omitted from results. Mirrors the genuine fixture halfway through a 13.5h
-//    precompute. All other profile/layer pairs are populated.
+// 7. Every profile/layer pair is populated. This assertion used to be its
+//    inverse — it required school to be ABSENT for bike, because it was written
+//    against a field that was still half-computed and school/bike genuinely had
+//    no rows yet. The completed run gave that pair 123,203 cells, so the old
+//    assertion was asserting the fixture rather than the behaviour, and it kept
+//    passing afterwards only because stale suggest2: cache entries were still
+//    being served. Assert the real contract instead: a layer with rows shows up.
 {
   const res = await suggest({ profile: "bike", w: "school:3,groceries:1" });
   check(
     res.status === 200,
-    "request with unavailable profile/layer pair (bike+school) succeeds",
+    "bike + school request succeeds",
     `HTTP ${res.status}`
   );
-  if (res.body.cells) {
-    let schoolAbsent = true;
-    for (const cell of res.body.cells) {
-      if ("school" in cell.layers) {
-        schoolAbsent = false;
-        break;
-      }
-    }
+  if (res.body.cells?.length) {
+    const withSchool = res.body.cells.filter((c) => "school" in c.layers).length;
     check(
-      schoolAbsent,
-      "school is absent from all bike result layers (fixture gap)",
-      schoolAbsent ? "✓" : "found in at least one cell"
+      withSchool > 0,
+      "school appears in bike results now that school/bike is populated",
+      `${withSchool}/${res.body.cells.length} cells`
     );
   }
 }
@@ -291,22 +289,68 @@ const suggest = async (params) => {
   }
 }
 
-// 13. Per-profile decay: bike scores (300s decay) must vary more than walk scores
-//     (900s decay). Without per-profile decay, bike would compress toward 1.0.
-//     For a multi-layer bike vector, score range must be meaningful (use 0.2 as
-//     threshold; tight but loose enough to not be brittle on re-seeds).
-{
-  const res = await suggest({ profile: "bike", w: "groceries:3,health:2,dining:1" });
-  if (res.body.available && Array.isArray(res.body.cells) && res.body.cells.length > 1) {
-    const scores = res.body.cells.map(c => c.score);
-    const minScore = Math.min(...scores);
-    const maxScore = Math.max(...scores);
-    const range = maxScore - minScore;
-    const ok = range >= 0.2;
+// 13. Per-profile decay is actually applied (T-017): bike scores on 300s, walk
+//     on 900s (REACH_DECAY_SECONDS in layers.ts).
+//
+//     This used to assert "bike score range >= 0.2, not compressed at 1.0",
+//     which was the wrong test for the right worry. Against the complete field
+//     the top ten legitimately all score 1.0 — bike/groceries:3,health:2,dining:1
+//     has 230 such cells out of 130,541, i.e. 0.18%, which is the decay being
+//     selective, not compressed. Top-of-list saturation is expected whenever a
+//     grid cell contains one of every requested amenity, and Berlin has hundreds
+//     of those. Recompute the score from the seconds the response already
+//     reports instead — that pins the decay exactly and cannot be satisfied by
+//     the wrong constant.
+const DECAY = { walk: 900, wheelchair: 900, bike: 300 };
+for (const [profile, w] of [["bike", "school:2,health:2,dining:1"], ["walk", "school:2,health:2,dining:1"]]) {
+  const res = await suggest({ profile, w });
+  const weights = Object.fromEntries(w.split(",").map((t) => t.split(":")).map(([l, n]) => [l, +n]));
+  const total = Object.values(weights).reduce((a, b) => a + b, 0);
+  const cells = res.body.cells ?? [];
+  // A cell where every layer is 0s scores 1.0 under any decay, so it cannot
+  // distinguish 300 from 900. Only cells with a nonzero reading are evidence.
+  const witness = cells.find((c) => Object.values(c.layers).some((s) => s > 0));
+  if (!witness) {
+    check(false, `${profile}: found a cell with nonzero seconds to check decay against`, "all cells 0s");
+  } else {
+    const expected =
+      Object.entries(witness.layers).reduce(
+        (acc, [layer, secs]) => acc + weights[layer] * Math.max(0, 1 - secs / DECAY[profile]),
+        0
+      ) / total;
+    const ok = Math.abs(expected - witness.score) < 0.001;
     check(
       ok,
-      "bike scores span meaningful range (≥0.2), not compressed at 1.0",
-      `range ${(maxScore - minScore).toFixed(3)}, min ${minScore.toFixed(3)}, max ${maxScore.toFixed(3)}`
+      `${profile} score matches the ${DECAY[profile]}s decay formula`,
+      `expected ${expected.toFixed(4)}, got ${witness.score.toFixed(4)} from ${JSON.stringify(witness.layers)}`
+    );
+  }
+}
+
+// 13b. Tie-breaking must not sort the map. Any saturated query has far more
+//      perfect cells than the ten returned (230 for bike/groceries:3,health:2,
+//      dining:1, spanning 52.3866-52.6350), and breaking those ties by latitude
+//      returned the southernmost ten — a 5.7km band on the city limit, with
+//      Mitte and Prenzlauer Berg scoring identically and never shown. The fix is
+//      md5(cell_id); this asserts the symptom stays gone.
+//
+//      Threshold measured from both sides, not guessed: the lat-ordered bug
+//      spans 0.0510 deg and the md5 fix spans 0.1290 on the same field, so 0.08
+//      sits between them with room either way. An earlier 0.05 was worthless —
+//      it passed against the buggy build. Expect some drift when the reach field
+//      is recomputed, since cell ids are reassigned and the sampled ten change;
+//      if this fails after a fresh precompute, check the span against the tied
+//      set's full range (0.2484 here) before assuming a regression.
+{
+  const res = await suggest({ profile: "bike", w: "groceries:3,health:2,dining:1" });
+  const cells = res.body.cells ?? [];
+  if (cells.length > 1) {
+    const lats = cells.map((c) => c.lat);
+    const span = Math.max(...lats) - Math.min(...lats);
+    check(
+      span > 0.08,
+      "tied results spread across the city, not clustered on one edge",
+      `lat span ${span.toFixed(4)} over ${cells.length} cells`
     );
   }
 }

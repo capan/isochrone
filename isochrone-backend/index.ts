@@ -1331,8 +1331,17 @@ const normalizeWeights = (weights: Record<string, number>): [string, number][] =
 // formula below changes — same precedent as poi2 above (/api/amenities).
 // T-016's verification lost half an hour to stale entries under an
 // unchanged prefix; do not repeat that.
+//
+// suggest3: bumped again because the tie-break moved from lat/lon to
+// md5(cell_id) (see the spread CTE). The scores are identical; the ten cells
+// chosen out of a tied set are not, so every suggest2: entry holds a
+// southern-edge answer this code would no longer produce. This bump is also
+// what makes the completed Berlin precompute safe to cut over to — the reach
+// table was reloaded with a different shape, which is the first condition
+// above, and it caught us anyway during local verification: 14/14 passed
+// against suggest2: entries warmed while the field was still half-computed.
 const suggestCacheKey = (profile: string, entries: [string, number][]) =>
-  `suggest2:${profile}:${entries.map(([l, w]) => `${l}:${w}`).join(",")}`;
+  `suggest3:${profile}:${entries.map(([l, w]) => `${l}:${w}`).join(",")}`;
 
 // ST_SnapToGrid guarantees at most one candidate per coarse cell but nothing
 // about the gap BETWEEN cells — two candidates straddling a grid boundary can
@@ -1418,23 +1427,36 @@ const scoreSuggestions = async (profile: string, entries: [string, number][]) =>
      -- 10 mutually-distant ones from.
      spread AS (
        SELECT DISTINCT ON (ST_SnapToGrid(c.geom, $6))
-              c.geom, s.score, s.layers
+              c.id AS cell_id, c.geom, s.score, s.layers
          FROM scored s
          JOIN ${DEFAULT_SCHEMA}.reach_cells c ON c.id = s.cell_id
-        -- Coordinates break score ties on purpose. A single-layer weight vector
-        -- (reachable from the questionnaire: groceries:1 and every other answer
-        -- at zero) puts every cell collocated with a shop at exactly 1.0 — 37 of
-        -- them for groceries in Berlin — and an unordered tie means the same
-        -- question can answer differently after a restart, with the cache then
-        -- freezing whichever order that run happened to produce.
-        ORDER BY ST_SnapToGrid(c.geom, $6), s.score DESC, ST_Y(c.geom), ST_X(c.geom)
+        -- Score ties are broken deterministically, but deliberately NOT by
+        -- coordinate. A single-layer weight vector (reachable from the
+        -- questionnaire: groceries:1 and every other answer at zero) puts every
+        -- cell collocated with a shop at exactly 1.0 — 37 of them for groceries
+        -- in Berlin — and an unordered tie means the same question can answer
+        -- differently after a restart, with the cache then freezing whichever
+        -- order that run happened to produce.
+        --
+        -- Ordering those ties by latitude, which is what this did first, turned
+        -- out worse than non-determinism. Measured against the complete field:
+        -- bike / groceries:3,health:2,dining:1 has 230 cells at exactly 1.0,
+        -- spanning 52.3866–52.6350 — the full 27km of the city — and lat-order
+        -- returned the southernmost ten, a 5.7km band on the city limit. Mitte
+        -- and Prenzlauer Berg scored identically and were never shown. Any
+        -- saturated query pointed at the same edge of the map.
+        --
+        -- md5 of the cell id is stable across restarts and cache warms, which
+        -- is all the coordinate sort was actually buying, and it samples the
+        -- tied set uniformly instead of sorting it geographically.
+        ORDER BY ST_SnapToGrid(c.geom, $6), s.score DESC, md5(c.id::text)
      )
      SELECT ROUND(ST_Y(geom)::numeric, 6)::double precision AS lat,
             ROUND(ST_X(geom)::numeric, 6)::double precision AS lon,
             ROUND(score::numeric, 4)::double precision AS score,
             layers
        FROM spread
-      ORDER BY score DESC, lat, lon
+      ORDER BY score DESC, md5(cell_id::text)
       LIMIT 200`,
     [layers, weights, decaySeconds, totalWeight, profile, REACH_SPREAD_DEGREES]
   );
