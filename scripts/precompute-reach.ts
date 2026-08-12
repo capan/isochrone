@@ -10,20 +10,31 @@
 // per-profile rather than a single constant.
 //
 // DO NOT RUN THIS AGAINST PRODUCTION, OR ANY LIVE DATABASE. A full-city
-// pgr_drivingDistance did not finish in 10 minutes when measured against prod
-// (berlin.ways_vertices_pgr = 649,899 rows, berlin.ways = 809,619 rows) — that
-// is expected here, this script is offline and unattended, but it means the
-// traversal cannot be babysat. Worse: pgRouting ignores statement_timeout and
-// pg_cancel_backend while it is inside its C loop, so a runaway traversal can
-// only be stopped with pg_terminate_backend from a second session, and that
-// lands minutes late. Run this against a copy of the database on a machine
-// that is not serving traffic.
+// pgr_drivingDistance takes 21.8 minutes on the CX23 (berlin.ways_vertices_pgr
+// = 649,899 rows, berlin.ways = 809,619 rows) — that is expected here, this
+// script is offline and unattended, but it means the traversal cannot be
+// babysat. Worse: pgRouting ignores statement_timeout and pg_cancel_backend
+// while it is inside its C loop, so a runaway traversal can only be stopped
+// with pg_terminate_backend from a second session, and that lands minutes
+// late. Run this against a copy of the database on a machine that is not
+// serving traffic.
 //
-// Expected runtime: 21 traversals at ~39 minutes each measured (graph-size
-// bound, not source-count bound — nearest-of-N costs the same as
-// nearest-of-one, see the super-source trick below) — ~13.5 hours total,
-// up from ~9h for the 14 walk/wheelchair-only traversals, unattended, on a
-// laptop. The bike traversal costs about the same as walk per pair despite
+// Note there is NO code-level guard enforcing this, despite ADR-0015 claiming
+// one — PGHOST defaults to 127.0.0.1, which is a default, not a refusal. The
+// rule is documentation only. ADR-0019 records the one run that overrode it
+// (Berlin, 2026-08-12, on the box, by owner decision) and what it measured.
+//
+// Expected runtime, both figures now measured on the full Berlin graph rather
+// than projected (the earlier ~39 min/traversal here was an extrapolation of
+// the n^2.18 curve about 10x past its data points, and overshot by 1.8x):
+//
+//   M5 laptop, 2026-08-12:  ~400s per traversal, 2h20m for all 21
+//   Hetzner CX23 (2 vCPU):  ~1300s per traversal, ~7.6h for all 21
+//
+// Cost is graph-size bound, not source-count bound — nearest-of-N costs the
+// same as nearest-of-one (see the super-source trick below). Measured: dining
+// has 12,179 POIs and playground 5,620, and their walk traversals differ by
+// under 2%. The bike traversal costs about the same as walk per pair despite
 // the higher speed, because its cap is chosen to explore the same ~2.5km
 // footprint (see REACH_CAP_SECONDS in layers.ts) rather than several times
 // more of the graph.
