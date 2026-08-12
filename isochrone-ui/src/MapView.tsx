@@ -1021,7 +1021,23 @@ export default function MapView() {
   const focusSuggestion = (c: SuggestCell) => {
     const map = mapRef.current;
     if (!map) return;
-    map.setView([c.lat, c.lon], Math.max(map.getZoom(), 16));
+    // Switch to the profile the questionnaire was answered with. A suggestion
+    // earned its place by cycling reach or wheelchair reach; drawing it as a
+    // walk would show a different shape than the one that was ranked, which is
+    // the sort of quiet mismatch this project keeps getting caught by.
+    if (profileRef.current !== suggestProfile) {
+      profileRef.current = suggestProfile;
+      setProfile(suggestProfile);
+    }
+    // 14, not 16: a 15-minute walk is roughly a 1.25km radius and overflows the
+    // viewport at 16, so the isochrone we just drew would be mostly off-screen.
+    map.setView([c.lat, c.lon], 14);
+    // Draw the reach from here. Clicking a result and getting only a pin left
+    // the two halves of the product disconnected — the suggestion says "this
+    // place is close to everything" and the isochrone is what shows it.
+    // updateIsochrones owns the marker and lastClickRef, so switching profile
+    // afterwards redraws at this spot rather than the last map click.
+    updateRef.current(c.lat, c.lon);
     L.popup({ closeButton: false, className: "place-popup" })
       .setLatLng([c.lat, c.lon])
       // A DOM node, not an HTML string: the name comes from Nominatim, and
@@ -1440,9 +1456,15 @@ export default function MapView() {
                       {suggestCells.map((c, i) => (
                         <li key={`${c.lat},${c.lon}`}>
                           <button onClick={() => focusSuggestion(c)} title="Show on map">
-                            <span className="pl-min suggest-rank">
-                              {scoresAreTied(suggestCells) ? "•" : `#${i + 1}`}
-                            </span>
+                            {/* Plain enumeration, not a score. A bare bullet
+                                read as a broken list marker, and a normalised
+                                0-100 would be worse than either: stretching
+                                1.0000-0.9942 across a full range manufactures a
+                                large-looking difference out of 0.6%. The note
+                                above already says these are alternatives, so
+                                the number is just "which one am I looking at".
+                                Revisit once density gives a real spread. */}
+                            <span className="pl-min suggest-rank">{i + 1}</span>
                             <span className="pl-body">
                               <span className="pl-name">
                                 {c.name ??

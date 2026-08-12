@@ -366,6 +366,15 @@ a { color: #2a63b5; }
   font-size: 12px;
 }
 
+/* Ten two-line results pushed "Places within reach" off the bottom of the
+   panel, and clicking a suggestion now populates that very list — so the thing
+   the click produces was the thing it hid. Capping the height keeps both
+   sections on screen without adding a disclosure control to click through. */
+.suggest-results {
+  max-height: 320px;
+  overflow-y: auto;
+}
+
 /* One clause of caveat (bike/one-way) or the dog→greenspace disclosure —
    both sit right under the buttons that triggered them, not tucked away. */
 .suggest-note { margin: 4px 0 0; font-size: 11px; }
