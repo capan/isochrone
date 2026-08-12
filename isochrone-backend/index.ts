@@ -18,6 +18,8 @@ import {
   REACH_SPREAD_METERS,
   REACH_MAX_WEIGHT,
   MAX_SNAP_METERS,
+  COVERAGE_GRID_DEGREES,
+  COVERAGE_SIMPLIFY_DEGREES,
   PROFILES,
   ProfileName,
   costExpr,
@@ -222,6 +224,12 @@ const ensureAreasTable = async () => {
     -- coordinates in that case. No backfill for existing rows: this is stamped
     -- once, at import time, same as pois_at.
     ALTER TABLE public.areas ADD COLUMN IF NOT EXISTS name text;
+    -- NULL = the graph footprint has not been dissolved for this area yet, and
+    -- /api/coverage falls back to its bbox. Backfilled once at startup rather
+    -- than by a migration, because it is derived data that any schema can
+    -- regenerate from its own vertices. See COVERAGE_GRID_DEGREES in layers.ts
+    -- for why the overlay must not be drawn from bbox.
+    ALTER TABLE public.areas ADD COLUMN IF NOT EXISTS coverage geometry(MultiPolygon, 4326);
     CREATE INDEX IF NOT EXISTS idx_areas_bbox ON public.areas USING GIST (bbox);
   `);
   // T-016: the reach field — seconds from every routable cell to its nearest
@@ -303,6 +311,78 @@ const ensureAreasTable = async () => {
      RETURNING id`
   );
   if (stuck.rowCount) console.log(`↻ re-queued ${stuck.rowCount} stuck import(s)`);
+};
+
+// Dissolve a schema's routable vertices into the polygon the map should veil
+// around. See COVERAGE_GRID_DEGREES in layers.ts for the measurements and for
+// why a bbox is the wrong shape.
+//
+// main_component only, matching the vertex snap in /api/isochrone: a click that
+// lands on a disconnected fragment routes nowhere, so drawing it as covered
+// would reintroduce the same lie at a smaller scale.
+const computeCoverage = async (schemaName: string) => {
+  const r = await pool.query<{ g: string | null }>(
+    `WITH g AS (
+       SELECT DISTINCT ST_SnapToGrid(geom, $1) AS c
+         FROM ${schemaName}.ways_vertices_pgr
+        WHERE main_component
+     )
+     SELECT ST_Multi(
+              ST_SimplifyPreserveTopology(
+                ST_Union(ST_Expand(c, $1 / 2)), $2
+              )
+            )::text AS g
+       FROM g`,
+    [COVERAGE_GRID_DEGREES, COVERAGE_SIMPLIFY_DEGREES]
+  );
+  return r.rows[0]?.g ?? null;
+};
+
+const storeCoverage = async (areaId: number, schemaName: string) => {
+  try {
+    const mask = await computeCoverage(schemaName);
+    if (!mask) {
+      console.warn(`⚠️ ${schemaName}: no routable vertices, coverage left as bbox`);
+      return;
+    }
+    await pool.query(`UPDATE public.areas SET coverage = $2 WHERE id = $1`, [
+      areaId,
+      mask,
+    ]);
+  } catch (err) {
+    // A failed dissolve must not fail an import or block startup — the COALESCE
+    // in /api/coverage keeps serving the bbox, which is what shipped before.
+    console.error(`⚠️ coverage for ${schemaName} failed:`, (err as Error).message);
+  }
+};
+
+// One-off per area, not a migration: derived from vertices, so any schema can
+// regenerate it. Serial rather than concurrent — this runs at startup alongside
+// the queue drain and the suggest warm pass, and Berlin's dissolve alone reads
+// 618,345 vertices.
+const backfillCoverage = async () => {
+  let pending;
+  try {
+    pending = await pool.query<{ id: number; schema_name: string }>(
+      `SELECT id, schema_name FROM public.areas
+        WHERE status = 'ready' AND coverage IS NULL ORDER BY created_at`
+    );
+  } catch (err) {
+    // Same 42703 case as /api/coverage: the column's ALTER lost to a precompute
+    // holding public.areas. Nothing to backfill into yet — the endpoint is
+    // serving bboxes and the next restart will pick this up.
+    if ((err as any).code !== "42703") throw err;
+    console.warn("⚠️ areas.coverage missing; serving bboxes until it exists");
+    return;
+  }
+  if (!pending.rowCount) return;
+  const t0 = Date.now();
+  for (const row of pending.rows) await storeCoverage(row.id, row.schema_name);
+  console.log(
+    `🗺️ dissolved coverage for ${pending.rowCount} area(s) in ${
+      Date.now() - t0
+    }ms`
+  );
 };
 
 // Which schema answers for this point: the smallest imported area containing
@@ -427,11 +507,34 @@ app.get("/api/areas", pollLimiter, async (_, res) => {
 // Merged coverage as one geometry. The map veils everything *outside* this,
 // and overlapping boxes would otherwise punch the veil twice and re-fill the
 // overlap (SVG evenodd), showing a dark patch inside covered ground.
+//
+// COALESCE(coverage, bbox): the dissolved graph footprint where it has been
+// computed, the old rectangle where it has not, so an area that has not been
+// dissolved yet over-claims exactly as it always did rather than vanishing.
+//
+// The 42703 branch is not paranoia, it is measured. ALTER TABLE public.areas ADD
+// COLUMN needs ACCESS EXCLUSIVE, and precompute-reach.ts joins public.areas
+// inside the transaction that wraps each ~400s traversal, so the column cannot
+// be added while a precompute is running — a 150s lock_timeout was not close to
+// enough. When that ALTER fails it takes the whole DDL block down with it, which
+// left this endpoint 500ing on a 5-second poll. Deploying code that assumes its
+// own migration succeeded is the bug; falling back to bbox is the fix.
+//
+// Do NOT wait indefinitely for that lock instead: a queued ACCESS EXCLUSIVE
+// request blocks every ACCESS SHARE behind it, which would stall the precompute
+// rather than the migration.
 app.get("/api/coverage", pollLimiter, async (_, res) => {
-  const r = await pool.query(
-    `SELECT ST_AsGeoJSON(ST_Union(bbox))::jsonb AS g
-       FROM public.areas WHERE status = 'ready'`
-  );
+  const withCoverage = `SELECT ST_AsGeoJSON(ST_Union(COALESCE(coverage, bbox)))::jsonb AS g
+                          FROM public.areas WHERE status = 'ready'`;
+  const bboxOnly = `SELECT ST_AsGeoJSON(ST_Union(bbox))::jsonb AS g
+                      FROM public.areas WHERE status = 'ready'`;
+  let r;
+  try {
+    r = await pool.query(withCoverage);
+  } catch (err) {
+    if ((err as any).code !== "42703") throw err; // 42703 = undefined_column
+    r = await pool.query(bboxOnly);
+  }
   res.json(r.rows[0]?.g ?? null);
 });
 
@@ -1017,6 +1120,10 @@ const runImport = async (areaId: number) => {
       `UPDATE public.areas SET status = 'ready', name = $2 WHERE id = $1`,
       [areaId, name]
     );
+    // After 'ready', not before: the veil should lift the moment the area can be
+    // routed on, and a dissolve failure must not strand a good import as
+    // permanently unready.
+    await storeCoverage(areaId, schemaName);
     console.log(
       `✅ imported ${schemaName} (${counts.rows[0].ways} ways) in ${
         Date.now() - start
@@ -1886,6 +1993,7 @@ const warmSuggestCache = async () => {
 };
 
 ensureAreasTable()
+  .then(backfillCoverage)
   .then(drainQueue)
   .then(warmSuggestCache)
   .catch((err) =>

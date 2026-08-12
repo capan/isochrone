@@ -110,6 +110,26 @@ export const REACH_SPREAD_DEGREES = 0.01;
 // tuning — it only has to land in the gap.
 export const MAX_SNAP_METERS = 500;
 
+// Coverage is drawn from the graph's own footprint, not from an area's bbox.
+//
+// A bbox is a rectangle and a city is not. Berlin's bbox is 1,793 km² while the
+// graph only has streets in at most 1,012 km² of it, so 44% of the undimmed map
+// was advertising data that is not there — a click 5,828m north-west of Frohnau,
+// out past Velten, sat inside the rectangle and got refused by MAX_SNAP_METERS.
+// The overlay was promising what the click check would deny.
+//
+// The mask is every routable vertex snapped to this grid, each cell expanded to
+// a full box, unioned and simplified. Measured on Berlin: 1,479 cells, 425 ring
+// points, 215 after simplification, 3,499 bytes of GeoJSON, covering 1,118 km².
+// 3.4KB is cheap enough that this can be served on every poll.
+//
+// 0.01° is ~680m x 1,110m at 52.5°N, so a cell is generous by up to ~550m at its
+// edges — deliberately close to MAX_SNAP_METERS above. The overlay and the snap
+// limit are then answering the same question at the same resolution, which is
+// what stops them disagreeing again. Do not tighten one without the other.
+export const COVERAGE_GRID_DEGREES = 0.01;
+export const COVERAGE_SIMPLIFY_DEGREES = 0.002;
+
 // Weights are answers to questions, not free parameters: a closed 0..3 range is
 // what keeps the whole answer space enumerable (648 combinations since T-017
 // added the dog household option and the bike profile; 324 before), which is
