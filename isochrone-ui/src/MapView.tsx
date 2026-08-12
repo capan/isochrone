@@ -875,8 +875,16 @@ export default function MapView() {
         }
 
         if (!features.length) {
+          // Do not guess at the cause. This fires on a 200 with no bands, which
+          // means the click DID snap to a routable vertex — the server's 400
+          // covers the "no street nearby" case with an exact distance. So the
+          // spot is on the network and simply cannot reach anything in the time
+          // budget: measured on vertex 70954, whose only edge is a 1,764m path,
+          // 21 minutes on foot and therefore empty at 15. The old copy blamed
+          // "stairs or rough surfaces", which is wrong for walk in particular —
+          // stairs are passable there at half speed (PROFILES in layers.ts).
           showToast(
-            `No reachable streets here for "${profileRef.current}". Stairs or rough surfaces may block this spot.`
+            `Nothing reachable within ${data.minutes} min from here on "${profileRef.current}". Try more minutes, or another profile.`
           );
         }
       } catch (err) {
