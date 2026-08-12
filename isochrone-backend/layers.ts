@@ -118,17 +118,39 @@ export const MAX_SNAP_METERS = 500;
 // out past Velten, sat inside the rectangle and got refused by MAX_SNAP_METERS.
 // The overlay was promising what the click check would deny.
 //
-// The mask is every routable vertex snapped to this grid, each cell expanded to
-// a full box, unioned and simplified. Measured on Berlin: 1,479 cells, 425 ring
-// points, 215 after simplification, 3,499 bytes of GeoJSON, covering 1,118 km².
-// 3.4KB is cheap enough that this can be served on every poll.
+// The mask is every routable vertex snapped to COVERAGE_GRID_DEGREES, each cell
+// expanded by COVERAGE_EXPAND_DEGREES, unioned, then simplified.
 //
-// 0.01° is ~680m x 1,110m at 52.5°N, so a cell is generous by up to ~550m at its
-// edges — deliberately close to MAX_SNAP_METERS above. The overlay and the snap
-// limit are then answering the same question at the same resolution, which is
-// what stops them disagreeing again. Do not tighten one without the other.
-export const COVERAGE_GRID_DEGREES = 0.01;
-export const COVERAGE_SIMPLIFY_DEGREES = 0.002;
+// These three numbers are a budget, not taste. The mask MUST be a subset of
+// "within MAX_SNAP_METERS of a routable vertex", or it undims ground the click
+// check will refuse — the exact bug it was built to fix. Worst-case distance
+// from a mask point to the vertex that put it there:
+//
+//   (GRID/2 + EXPAND + SIMPLIFY) degrees
+//
+// GRID/2 because ST_SnapToGrid moves a vertex up to half a cell before anything
+// else happens, EXPAND because the box reaches that far past the snapped point,
+// SIMPLIFY because ST_SimplifyPreserveTopology may push a boundary outward by
+// its tolerance. At 52.5°N one degree is 111,320m of latitude and 67,800m of
+// longitude, so the diagonal is ~130,340 m/deg:
+//
+//   (0.001 + 0.002 + 0.0005) x 130,340 = 456m  <= 500m  ✅
+//
+// The first version used 0.01/0.005/0.002 and reasoned that a ~680m x 1,110m
+// cell was "close to MAX_SNAP_METERS". That was the wrong bound: cell size is
+// not the error, GRID/2 + EXPAND + SIMPLIFY is, and those settings allowed
+// 1,564m. Measured on the shipped mask: 15 of 400 sampled points were beyond
+// 500m, worst 919m, and a click on Nuthestraße in Potsdam sat inside the mask
+// while the nearest street was 835m away. With the numbers above, 0 of 598
+// sampled points violate, worst 314m.
+//
+// Cost of being right: Berlin's mask goes from 215 points / 3.5KB to 3,095
+// points / 48KB, and from 1,118 km² to 979 km² — it now under-claims slightly,
+// which is the safe direction. Verify with the sampling query in
+// scripts/check-coverage.mjs after changing any of these.
+export const COVERAGE_GRID_DEGREES = 0.002;
+export const COVERAGE_EXPAND_DEGREES = 0.002;
+export const COVERAGE_SIMPLIFY_DEGREES = 0.0005;
 
 // Weights are answers to questions, not free parameters: a closed 0..3 range is
 // what keeps the whole answer space enumerable (648 combinations since T-017

@@ -19,6 +19,7 @@ import {
   REACH_MAX_WEIGHT,
   MAX_SNAP_METERS,
   COVERAGE_GRID_DEGREES,
+  COVERAGE_EXPAND_DEGREES,
   COVERAGE_SIMPLIFY_DEGREES,
   PROFILES,
   ProfileName,
@@ -320,27 +321,40 @@ const ensureAreasTable = async () => {
 // main_component only, matching the vertex snap in /api/isochrone: a click that
 // lands on a disconnected fragment routes nowhere, so drawing it as covered
 // would reintroduce the same lie at a smaller scale.
-const computeCoverage = async (schemaName: string) => {
+const computeCoverage = async (areaId: number, schemaName: string) => {
   const r = await pool.query<{ g: string | null }>(
     `WITH g AS (
        SELECT DISTINCT ST_SnapToGrid(geom, $1) AS c
          FROM ${schemaName}.ways_vertices_pgr
         WHERE main_component
+     ),
+     m AS (
+       SELECT ST_SimplifyPreserveTopology(ST_Union(ST_Expand(c, $2)), $3) AS mask
+         FROM g
      )
-     SELECT ST_Multi(
-              ST_SimplifyPreserveTopology(
-                ST_Union(ST_Expand(c, $1 / 2)), $2
-              )
-            )::text AS g
-       FROM g`,
-    [COVERAGE_GRID_DEGREES, COVERAGE_SIMPLIFY_DEGREES]
+     -- Clipped to the area's own bbox, which is not cosmetic. ST_Expand pushes
+     -- the mask up to EXPAND degrees (~222m) past vertices on the box edge, and
+     -- /api/isochrone selects a schema by bbox containment — so an unclipped
+     -- mask claims a rim that no schema will ever route, and the click is
+     -- refused inside undimmed ground. Measured before clipping: 33 of 40
+     -- sampled points refused, one of them 6,086m from any street, because
+     -- area_61's mask spilled outside area_61's bbox into a part of Berlin that
+     -- Berlin's own mask correctly excludes.
+     SELECT ST_Multi(ST_Intersection(m.mask, a.bbox))::text AS g
+       FROM m JOIN public.areas a ON a.id = $4`,
+    [
+      COVERAGE_GRID_DEGREES,
+      COVERAGE_EXPAND_DEGREES,
+      COVERAGE_SIMPLIFY_DEGREES,
+      areaId,
+    ]
   );
   return r.rows[0]?.g ?? null;
 };
 
 const storeCoverage = async (areaId: number, schemaName: string) => {
   try {
-    const mask = await computeCoverage(schemaName);
+    const mask = await computeCoverage(areaId, schemaName);
     if (!mask) {
       console.warn(`⚠️ ${schemaName}: no routable vertices, coverage left as bbox`);
       return;
@@ -523,11 +537,43 @@ app.get("/api/areas", pollLimiter, async (_, res) => {
 // Do NOT wait indefinitely for that lock instead: a queued ACCESS EXCLUSIVE
 // request blocks every ACCESS SHARE behind it, which would stall the precompute
 // rather than the migration.
+// Cached, because the union is not cheap and the poll is per-client: measured
+// 290ms and 283KB for 35 areas, every 5 seconds, which is ~6% of one CX23 core
+// per visitor before anyone has asked for an isochrone. The mask got 14x bigger
+// when its grid was tightened to stop over-claiming (COVERAGE_GRID_DEGREES),
+// which is what made this worth caching rather than just recomputing.
+//
+// Keyed on a fingerprint rather than invalidated by hand: coverage changes when
+// an area becomes ready, is evicted, or gets its mask backfilled, and those
+// writes are spread across the importer, the evictor and startup. Three counts
+// over a 35-row table cost microseconds and cannot silently go stale the way a
+// forgotten invalidation call can. Express's ETag then turns the repeat polls
+// into 304s with no body, so the wire cost is already near zero — this is about
+// the database, not the network.
+let coverageCache: { key: string; body: unknown } | null = null;
+
 app.get("/api/coverage", pollLimiter, async (_, res) => {
   const withCoverage = `SELECT ST_AsGeoJSON(ST_Union(COALESCE(coverage, bbox)))::jsonb AS g
                           FROM public.areas WHERE status = 'ready'`;
   const bboxOnly = `SELECT ST_AsGeoJSON(ST_Union(bbox))::jsonb AS g
                       FROM public.areas WHERE status = 'ready'`;
+
+  let key = "nokey";
+  try {
+    const f = await pool.query(
+      `SELECT count(*)::text || ':' || COALESCE(max(id), 0)::text || ':' ||
+              count(coverage)::text AS k
+         FROM public.areas WHERE status = 'ready'`
+    );
+    key = f.rows[0].k;
+    if (coverageCache?.key === key) {
+      res.json(coverageCache.body);
+      return;
+    }
+  } catch (err) {
+    if ((err as any).code !== "42703") throw err; // column not added yet
+  }
+
   let r;
   try {
     r = await pool.query(withCoverage);
@@ -535,7 +581,9 @@ app.get("/api/coverage", pollLimiter, async (_, res) => {
     if ((err as any).code !== "42703") throw err; // 42703 = undefined_column
     r = await pool.query(bboxOnly);
   }
-  res.json(r.rows[0]?.g ?? null);
+  const body = r.rows[0]?.g ?? null;
+  if (key !== "nokey") coverageCache = { key, body };
+  res.json(body);
 });
 
 app.get("/api/areas/:id", pollLimiter, async (req: any, res: any) => {
