@@ -200,7 +200,26 @@ type SuggestCell = {
   lon: number;
   score: number;
   layers: Partial<Record<ReachLayer, number>>;
+  // null until the backend has reverse-geocoded it; results are useful without
+  // one, so this never blocks the response (see withPlaceNames in index.ts).
+  name?: string | null;
 };
+
+// Sub-minute reach is the normal case in inner Berlin, not an edge case, and
+// Math.round turned all of it into "0′" — a whole panel of zeroes reads as
+// broken data rather than as "it is right there".
+const reachLabel = (secs: number) =>
+  secs < 60 ? "<1′" : `${Math.round(secs / 60)}′`;
+
+// Ten results whose scores differ in the fourth decimal are not a ranking, and
+// printing "100% match" ten times says so in the least useful way. Measured on
+// the default answers: 1.0000, 1.0000, 1.0000, 1.0000, 0.9978 … 0.9942 — a
+// spread of 0.6%, all of which rounds to 100. So only claim a ranking when the
+// numbers support one.
+const SUGGEST_TIE_EPSILON = 0.02;
+const scoresAreTied = (cells: SuggestCell[]) =>
+  cells.length > 1 &&
+  cells[0].score - cells[cells.length - 1].score < SUGGEST_TIE_EPSILON;
 
 // Five questions set weights; the answers are typed as a closed union each,
 // which is what keeps the answer space closed — 4·3·2·3·3·3 = 648 sets once
@@ -617,9 +636,16 @@ export default function MapView() {
           fillColor: i === 0 ? "#ffb703" : "#3a86ff",
           fillOpacity: 0.92,
         })
-          .bindTooltip(`#${i + 1} · ${Math.round(c.score * 100)}% match`, {
-            direction: "top",
-          })
+          // The name, not the score: "100% match" on ten pins is noise, and the
+          // pin's own position already says where it is. DOM node rather than a
+          // string for the same reason as the popup below — Nominatim's text is
+          // not ours to render as markup.
+          .bindTooltip(
+            Object.assign(document.createElement("span"), {
+              textContent: c.name ?? `#${i + 1}`,
+            }),
+            { direction: "top" }
+          )
           .on("click", () => focusSuggestionRef.current(c))
           .addTo(g);
       });
@@ -998,7 +1024,14 @@ export default function MapView() {
     map.setView([c.lat, c.lon], Math.max(map.getZoom(), 16));
     L.popup({ closeButton: false, className: "place-popup" })
       .setLatLng([c.lat, c.lon])
-      .setContent(`<b>${Math.round(c.score * 100)}% match</b>`)
+      // A DOM node, not an HTML string: the name comes from Nominatim, and
+      // setContent would render it as markup. textContent cannot, and is less
+      // code than an escape helper — same reason the toast at showToast does it.
+      .setContent(
+        Object.assign(document.createElement("b"), {
+          textContent: c.name ?? `${c.lat.toFixed(4)}, ${c.lon.toFixed(4)}`,
+        })
+      )
       .openOn(map);
     if (window.innerWidth <= 720) setPanelOpen(false);
   };
@@ -1397,39 +1430,49 @@ export default function MapView() {
                 )}
 
                 {suggestState === "ok" && suggestCells.length > 0 && (
-                  <ul className="place-list suggest-results">
-                    {suggestCells.map((c, i) => (
-                      <li key={`${c.lat},${c.lon}`}>
-                        <button onClick={() => focusSuggestion(c)} title="Show on map">
-                          <span className="pl-min suggest-rank">#{i + 1}</span>
-                          <span className="pl-body">
-                            <span className="pl-name">
-                              {Math.round(c.score * 100)}% match
+                  <>
+                    <p className="muted suggest-tie-note">
+                      {scoresAreTied(suggestCells)
+                        ? `${suggestCells.length} areas, all equally close to what you picked — they are alternatives, not a ranking.`
+                        : `${suggestCells.length} areas, best first.`}
+                    </p>
+                    <ul className="place-list suggest-results">
+                      {suggestCells.map((c, i) => (
+                        <li key={`${c.lat},${c.lon}`}>
+                          <button onClick={() => focusSuggestion(c)} title="Show on map">
+                            <span className="pl-min suggest-rank">
+                              {scoresAreTied(suggestCells) ? "•" : `#${i + 1}`}
                             </span>
-                            <span className="pl-kind suggest-layers">
-                              {suggestLayers.map((layer) => {
-                                const secs = c.layers[layer];
-                                return (
-                                  <span
-                                    key={layer}
-                                    className={
-                                      secs == null
-                                        ? "suggest-layer suggest-miss"
-                                        : "suggest-layer"
-                                    }
-                                  >
-                                    {secs == null
-                                      ? `no ${LAYER_LABEL[layer]} in 30 min`
-                                      : `${LAYER_LABEL[layer]} ${Math.round(secs / 60)}′`}
-                                  </span>
-                                );
-                              })}
+                            <span className="pl-body">
+                              <span className="pl-name">
+                                {c.name ??
+                                  `${c.lat.toFixed(4)}, ${c.lon.toFixed(4)}`}
+                              </span>
+                              <span className="pl-kind suggest-layers">
+                                {suggestLayers.map((layer) => {
+                                  const secs = c.layers[layer];
+                                  return (
+                                    <span
+                                      key={layer}
+                                      className={
+                                        secs == null
+                                          ? "suggest-layer suggest-miss"
+                                          : "suggest-layer"
+                                      }
+                                    >
+                                      {secs == null
+                                        ? `no ${LAYER_LABEL[layer]} in 30 min`
+                                        : `${LAYER_LABEL[layer]} ${reachLabel(secs)}`}
+                                    </span>
+                                  );
+                                })}
+                              </span>
                             </span>
-                          </span>
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </>
                 )}
               </>
             )}

@@ -233,6 +233,23 @@ const ensureAreasTable = async () => {
     ALTER TABLE public.areas ADD COLUMN IF NOT EXISTS coverage geometry(MultiPolygon, 4326);
     CREATE INDEX IF NOT EXISTS idx_areas_bbox ON public.areas USING GIST (bbox);
   `);
+  // Names for suggestion results, keyed on coordinates rather than cell_id
+  // because cell ids are reassigned by every precompute while the grid is
+  // deterministic. NULL name = Nominatim answered but had nothing, which is a
+  // real answer and must not be retried on a loop; the row's existence is what
+  // stops the retry. Separate from the Redis revgeo: cache on purpose — that
+  // one has a 7-day TTL and does not survive a flush, and re-asking a public
+  // service for 275 places every time someone clears a cache is not acceptable
+  // use of it.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS public.place_names (
+      lat  numeric(8,4) NOT NULL,
+      lon  numeric(8,4) NOT NULL,
+      name text,
+      looked_up_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (lat, lon)
+    );
+  `);
   // T-016: the reach field — seconds from every routable cell to its nearest
   // amenity, per layer and profile — precomputed offline by
   // scripts/precompute-reach.ts (see layers.ts for why offline, and why
@@ -1652,6 +1669,97 @@ const scoreSuggestions = async (profile: string, entries: [string, number][]) =>
   return body;
 };
 
+// --- naming suggestion results (T-016 follow-up) ----------------------------
+//
+// "#1 100% match" tells a Berliner nothing; "Lausitzer Platz, Kreuzberg" tells
+// them everything. zoom=16, not the zoom=12 reverseGeocode uses for imported
+// areas: at 12 every cell in the city reverses to "Berlin" and ten results
+// share one label. 16 returns road + suburb, which is the granularity that
+// distinguishes them.
+//
+// The work is bounded and small. The questionnaire's answer space is closed
+// (648 combinations) and only 275 distinct cells appear across all of them, so
+// this asks Nominatim 275 questions once, at its 1 req/s limit — about five
+// minutes, then never again.
+const placeNameLabel = (address: Record<string, string> | undefined) => {
+  if (!address) return null;
+  // road is usually the recognisable half ("Lausitzer Platz"), suburb the
+  // orienting half ("Kreuzberg"). quarter is the fallback for a cell that
+  // snapped between named roads; borough for the outer districts where
+  // Nominatim returns no suburb.
+  const near = address.road ?? address.quarter ?? address.neighbourhood ?? null;
+  const area = address.suburb ?? address.borough ?? address.city ?? null;
+  if (near && area && near !== area) return `${near}, ${area}`.slice(0, 80);
+  return (near ?? area)?.slice(0, 80) ?? null;
+};
+
+const fetchPlaceName = async (lat: number, lon: number) => {
+  await geocodeSlot();
+  try {
+    const r = await fetch(
+      `${NOMINATIM_REVERSE_URL}?format=jsonv2&zoom=16&lat=${lat}&lon=${lon}`,
+      { headers: { "User-Agent": USER_AGENT }, signal: AbortSignal.timeout(10_000) }
+    );
+    if (!r.ok) return undefined; // transient — no row written, so it retries
+    return placeNameLabel(((await r.json()) as any)?.address);
+  } catch {
+    return undefined;
+  }
+};
+
+// In-flight guard: ten results arriving on every poll would otherwise queue the
+// same lookup repeatedly behind the 1 req/s gate and starve the fresh ones.
+const namingInFlight = new Set<string>();
+
+const fillPlaceNames = async (cells: { lat: number; lon: number }[]) => {
+  for (const { lat, lon } of cells) {
+    const k = `${lat.toFixed(4)},${lon.toFixed(4)}`;
+    if (namingInFlight.has(k)) continue;
+    namingInFlight.add(k);
+    try {
+      const name = await fetchPlaceName(lat, lon);
+      if (name === undefined) continue; // fetch failed; leave it unnamed
+      await pool.query(
+        `INSERT INTO public.place_names (lat, lon, name) VALUES ($1, $2, $3)
+         ON CONFLICT (lat, lon) DO UPDATE SET name = EXCLUDED.name, looked_up_at = now()`,
+        [lat.toFixed(4), lon.toFixed(4), name]
+      );
+    } catch (err) {
+      console.error(`⚠️ naming ${k} failed:`, (err as Error).message);
+    } finally {
+      namingInFlight.delete(k);
+    }
+  }
+};
+
+// Decorates on the way OUT of the cache, not on the way in. The scored answer is
+// cached for 7 days; names arrive minutes later and would otherwise be frozen as
+// null until the cache expired.
+const withPlaceNames = async (body: any) => {
+  if (!body?.cells?.length) return body;
+  const r = await pool.query<{ lat: string; lon: string; name: string | null }>(
+    `SELECT lat::text, lon::text, name FROM public.place_names
+      WHERE (lat, lon) IN (${body.cells
+        .map((_: unknown, i: number) => `($${i * 2 + 1}::numeric, $${i * 2 + 2}::numeric)`)
+        .join(",")})`,
+    body.cells.flatMap((c: any) => [c.lat.toFixed(4), c.lon.toFixed(4)])
+  );
+  const byKey = new Map(
+    r.rows.map((row) => [`${(+row.lat).toFixed(4)},${(+row.lon).toFixed(4)}`, row.name])
+  );
+  const missing: { lat: number; lon: number }[] = [];
+  const cells = body.cells.map((c: any) => {
+    const k = `${c.lat.toFixed(4)},${c.lon.toFixed(4)}`;
+    if (!byKey.has(k)) missing.push({ lat: c.lat, lon: c.lon });
+    return { ...c, name: byKey.get(k) ?? null };
+  });
+  // Deliberately not awaited: a first-time answer returns coordinates now and
+  // gains names on the next request, rather than blocking the response behind a
+  // 1 req/s external service.
+  if (missing.length) void fillPlaceNames(missing);
+  return { ...body, cells };
+};
+
 app.get("/api/suggest", async (req: any, res: any) => {
   const profile = String(req.query.profile ?? "walk");
   // REACH_PROFILES, not all of PROFILES: stroller and bike have no
@@ -1695,12 +1803,12 @@ app.get("/api/suggest", async (req: any, res: any) => {
   const cached = await cacheGet(key);
   if (cached) {
     cacheHits++;
-    return res.json(JSON.parse(cached as string));
+    return res.json(await withPlaceNames(JSON.parse(cached as string)));
   }
   cacheMisses++;
 
   try {
-    res.json(await scoreSuggestions(profile, entries));
+    res.json(await withPlaceNames(await scoreSuggestions(profile, entries)));
   } catch (err) {
     console.error("❌ suggest error:", err);
     res.status(500).json({ error: "Internal server error" });
@@ -2018,11 +2126,17 @@ const warmSuggestCache = async () => {
     }
     const start = Date.now();
     console.log(`🔥 warming ${WARM_ANSWERS.length} suggestion answer sets...`);
+    // Every cell the questionnaire can ever surface, collected as a side effect
+    // of warming rather than by a second sweep: 275 of them across all 648
+    // answers, which is the whole naming budget (see fillPlaceNames).
+    const everShown = new Map<string, { lat: number; lon: number }>();
     for (const answer of WARM_ANSWERS) {
       const entries = normalizeWeights(answer.weights);
       if (!entries.length) continue; // no combination above produces this; kept defensive
       try {
-        await scoreSuggestions(answer.profile, entries);
+        const body = await scoreSuggestions(answer.profile, entries);
+        for (const c of (body as any).cells ?? [])
+          everShown.set(`${c.lat.toFixed(4)},${c.lon.toFixed(4)}`, { lat: c.lat, lon: c.lon });
       } catch (err) {
         console.error(
           `⚠️ suggest warm pass: ${suggestCacheKey(answer.profile, entries)} failed:`,
@@ -2035,6 +2149,28 @@ const warmSuggestCache = async () => {
         Date.now() - start
       }ms`
     );
+
+    // Not awaited: this is ~275 requests at Nominatim's 1 req/s, so about five
+    // minutes. Startup must not wait for it, and results are useful unnamed.
+    const unnamed = await pool.query<{ lat: string; lon: string }>(
+      `SELECT v.lat::text, v.lon::text
+         FROM (VALUES ${[...everShown.values()]
+           .map((_, i) => `($${i * 2 + 1}::numeric, $${i * 2 + 2}::numeric)`)
+           .join(",")}) AS v(lat, lon)
+         LEFT JOIN public.place_names p ON p.lat = v.lat AND p.lon = v.lon
+        WHERE p.lat IS NULL`,
+      [...everShown.values()].flatMap((c) => [c.lat.toFixed(4), c.lon.toFixed(4)])
+    );
+    if (unnamed.rowCount) {
+      console.log(
+        `🏷️ naming ${unnamed.rowCount} of ${everShown.size} result places (~${Math.ceil(
+          unnamed.rowCount / 60
+        )} min at 1 req/s)`
+      );
+      void fillPlaceNames(
+        unnamed.rows.map((r) => ({ lat: +r.lat, lon: +r.lon }))
+      ).then(() => console.log(`🏷️ place naming complete`));
+    }
   } finally {
     warmingInFlight = false;
   }

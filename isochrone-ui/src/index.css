@@ -358,6 +358,14 @@ a { color: #2a63b5; }
   min-width: 0;
 }
 
+/* Says whether the list below is a ranking or a set of alternatives. Ten cells
+   whose scores differ in the fourth decimal are the latter, and numbering them
+   #1..#10 claimed an order the data does not support. */
+.suggest-tie-note {
+  margin: 0 0 8px;
+  font-size: 12px;
+}
+
 /* One clause of caveat (bike/one-way) or the dog→greenspace disclosure —
    both sit right under the buttons that triggered them, not tucked away. */
 .suggest-note { margin: 4px 0 0; font-size: 11px; }
