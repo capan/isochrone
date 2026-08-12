@@ -81,7 +81,7 @@ const {
   REACH_PROFILES,
   REACH_CAP_SECONDS,
   REACH_CELL_DEGREES,
-  REACH_MAX_SNAP_METERS,
+  MAX_SNAP_METERS,
   costExpr,
 } = layers;
 type ReachLayer = keyof typeof REACH_LAYERS;
@@ -216,11 +216,11 @@ async function buildSourceVertices(
   // to the same nearest vertex (a row of shops on one street), and a vertex
   // wired in twice would cost nothing extra but is worth not doing.
   //
-  // ST_DWithin bounds the snap at REACH_MAX_SNAP_METERS. Without it the field
+  // ST_DWithin bounds the snap at MAX_SNAP_METERS. Without it the field
   // ships wrong, not merely imprecise: the super-source wires every source
   // vertex at zero cost, so a POI is treated as sitting ON its nearest vertex
   // however far away it actually is, and a.bbox is a rectangle that covers
-  // Brandenburg land with no imported streets. See REACH_MAX_SNAP_METERS in
+  // Brandenburg land with no imported streets. See MAX_SNAP_METERS in
   // layers.ts for the measured distribution and the damage this did.
   //
   // geography, not geometry: on 4326 geometry ST_DWithin's units are degrees,
@@ -241,7 +241,7 @@ async function buildSourceVertices(
         WHERE p.kind = ANY($1::text[])
           AND ST_Contains(a.bbox, p.geom)
           AND ST_DWithin(nearest.geom::geography, p.geom::geography, $3)`,
-    [kinds, SCHEMA, REACH_MAX_SNAP_METERS]
+    [kinds, SCHEMA, MAX_SNAP_METERS]
   );
   const vertexCount = await client.query<{ n: number }>(
     `SELECT count(*)::int AS n FROM src`
@@ -264,12 +264,12 @@ async function buildSourceVertices(
       WHERE p.kind = ANY($1::text[])
         AND ST_Contains(a.bbox, p.geom)
         AND NOT ST_DWithin(nearest.geom::geography, p.geom::geography, $3)`,
-    [kinds, SCHEMA, REACH_MAX_SNAP_METERS]
+    [kinds, SCHEMA, MAX_SNAP_METERS]
   );
 
   console.log(
     `${layer}/${profile}: ${poiCount.rows[0].n} POIs -> ${vertexCount.rows[0].n} distinct vertices ` +
-      `(${dropped.rows[0].n} dropped as further than ${REACH_MAX_SNAP_METERS}m from the graph)`
+      `(${dropped.rows[0].n} dropped as further than ${MAX_SNAP_METERS}m from the graph)`
   );
   return vertexCount.rows[0].n;
 }

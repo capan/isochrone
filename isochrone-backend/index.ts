@@ -17,6 +17,7 @@ import {
   REACH_SPREAD_DEGREES,
   REACH_SPREAD_METERS,
   REACH_MAX_WEIGHT,
+  MAX_SNAP_METERS,
   PROFILES,
   ProfileName,
   costExpr,
@@ -366,10 +367,9 @@ const evictToFit = async () => {
   return true;
 };
 
-// A click farther than this from any routable street is outside the imported
-// area. In-city snaps measure 7–67m; Paris would otherwise snap to Berlin's
-// westernmost vertex and return a silent empty result.
-const MAX_SNAP_M = 500;
+// Moved to layers.ts as MAX_SNAP_METERS so the precompute is bound by the same
+// number — it was unbounded until this constant was shared, see that comment.
+const MAX_SNAP_M = MAX_SNAP_METERS;
 
 // Coverage extent for the 400 message, memoized per schema — a single cached
 // string would go stale the moment a new area is imported.

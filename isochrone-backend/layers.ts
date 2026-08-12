@@ -79,29 +79,36 @@ export const REACH_SPREAD_METERS = 700;
 // to a few hundred candidates without the O(n²) distance comparisons.
 export const REACH_SPREAD_DEGREES = 0.01;
 
-// How far a POI may be from the graph vertex it is wired to. Beyond this it is
-// dropped from the source set entirely rather than snapped.
+// How far anything — a user's click, or a POI being wired into the source set —
+// may be from the routable graph before it stops counting as "here".
 //
-// This is not a tuning knob, it is a correctness guard, and it was added after
-// the field shipped wrong. The super-source wires each source vertex at ZERO
-// cost, so an unbounded nearest-vertex snap makes a POI contribute as if it sat
-// on that vertex no matter how far away it really is. Berlin's area row is a
-// bounding BOX, which covers Brandenburg land with no imported streets, so
-// Falkensee POIs were snapping onto whichever Berlin boundary vertex was
-// closest and stacking zeros on it.
+// One constant, used by both /api/isochrone and the precompute, because two
+// nearly-agreeing snap limits are the same mistake as two nearly-agreeing grids
+// (see REACH_CELL_DEGREES above). It lived in index.ts as a local MAX_SNAP_M for
+// the click path only, which is exactly how the precompute came to have no bound
+// at all: the guard existed, in a place the precompute could not see it.
 //
-// Measured on the complete field: snap distance p50 25.7m, p99 226.1m, then
-// p99.5 2861.2m and a worst case of 15,711m — bimodal, with a 12x gap between
-// the real POIs and the teleported ones, so anything from 300m to 1km separates
-// them. 300m keeps everything up to p99 and drops 296 of 24,986 POIs across the
-// four questionnaire layers.
+// For clicks: a click farther than this from any routable street is outside the
+// imported area. In-city snaps measure 7-67m; Paris would otherwise snap to
+// Berlin's westernmost vertex and return a silent empty result.
 //
-// What it cost to not have this: vertex 70954 (a path dead end 1,764m from the
-// nearest junction, in an allotment strip off Havelländer Weg) collected a zero
-// for all four layers and scored a perfect 1.0, while the nearest real shop was
-// 2.8km away. 274 cells were wrong this way — 0.05% of rows, and 100% of what a
-// user saw, because a perfect score sorts to the top of every ranking.
-export const REACH_MAX_SNAP_METERS = 300;
+// For POIs the same unbounded snap is worse than a silent empty result, because
+// the super-source wires each source vertex at ZERO cost — so a POI is treated
+// as sitting ON its nearest vertex however far away it really is. And a.bbox is
+// a bounding BOX covering Brandenburg land with no imported streets, so
+// Falkensee POIs snapped onto whichever Berlin boundary vertex was closest and
+// stacked zeros on it. Measured: vertex 70954, a path dead end 1,764m from the
+// nearest junction in an allotment strip off Havelländer Weg, collected 84 POIs
+// from 1,468-3,950m away, read 0s for all four questionnaire layers, and ranked
+// first at a perfect 1.0 while the nearest real shop was 2.8km off. 274 cells
+// were wrong this way — 0.05% of rows and 100% of what a user saw, because a
+// perfect score sorts to the top of every ranking.
+//
+// 500 works for both because the snap distribution is bimodal with a 12x gap:
+// p50 25.7m, p99 226.1m, then p99.5 2,861m and a worst case of 15,711m. Anything
+// from 300m to 1km separates real from teleported, so this is not a value worth
+// tuning — it only has to land in the gap.
+export const MAX_SNAP_METERS = 500;
 
 // Weights are answers to questions, not free parameters: a closed 0..3 range is
 // what keeps the whole answer space enumerable (648 combinations since T-017
