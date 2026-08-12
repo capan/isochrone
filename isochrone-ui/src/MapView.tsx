@@ -298,10 +298,13 @@ const SUGGEST_QUESTIONS: SuggestQuestion[] = [
     id: "mobility",
     kind: "profile",
     label: "How do you get around?",
+    // Labels match the profile pills above the map, and the API's profile
+    // names, exactly. "Cycling" here next to a "bike" pill read as two
+    // different things when picking one visibly switched the other.
     options: [
-      { value: "walk", label: "Walking" },
+      { value: "walk", label: "Walk" },
       { value: "wheelchair", label: "Wheelchair" },
-      { value: "bike", label: "Cycling" },
+      { value: "bike", label: "Bike" },
     ],
   },
   {
@@ -1018,6 +1021,25 @@ export default function MapView() {
   // Coordinates only in the popup — the endpoint deliberately returns no
   // name (T-016 non-goal: reverse-geocoding N results per request would sit
   // behind the 1 req/s geocodeSlot() gate).
+  // Picking a mobility option previews it immediately: the pill above the map
+  // moves and, if somewhere is already selected, its isochrone redraws in the
+  // new profile. Answering "how do you get around" and watching nothing change
+  // until "Show me" made the question feel disconnected from the map behind it.
+  //
+  // Only the map view is previewed — the *answers* stay draft until submit, so
+  // closing with X still discards them. The profile pill is a view setting
+  // rather than part of the answer set, and leaving the map on the last profile
+  // the user actually clicked is truer than snapping it back.
+  //
+  // redrawRef is a no-op when nothing has been clicked yet, so opening the
+  // questionnaire cold and flipping profiles costs nothing.
+  const previewProfile = (p: "walk" | "wheelchair" | "bike") => {
+    setDraftProfile(p);
+    profileRef.current = p;
+    setProfile(p);
+    redrawRef.current();
+  };
+
   const focusSuggestion = (c: SuggestCell) => {
     const map = mapRef.current;
     if (!map) return;
@@ -1055,15 +1077,31 @@ export default function MapView() {
 
   // Opens with a fresh copy of the committed answers, so repeated edit/cancel
   // cycles can't leak a half-typed draft from a previous open.
+  // What the map was showing before the questionnaire opened, so cancelling can
+  // undo a profile preview. Stored rather than assumed to be suggestProfile:
+  // the pills include stroller, which the questionnaire cannot express, and
+  // snapping a stroller view to "walk" on cancel would discard a choice the
+  // user made outside this modal.
+  const profileBeforeModalRef = useRef(profile);
+
   const openSuggestModal = () => {
     setDraftAnswers({ ...suggestAnswers });
     setDraftProfile(suggestProfile);
+    profileBeforeModalRef.current = profileRef.current;
     setSuggestModalOpen(true);
   };
 
   // Escape / backdrop / × all end here: the draft is simply discarded, and
-  // focus goes back to whichever button opened the modal.
+  // focus goes back to whichever button opened the modal. That now includes any
+  // profile previewed while it was open — otherwise cancelling could leave the
+  // pill on "bike" while the committed summary line still read "Walk", which is
+  // the mismatch the preview was added to remove.
   const closeSuggestModal = () => {
+    if (profileRef.current !== profileBeforeModalRef.current) {
+      profileRef.current = profileBeforeModalRef.current;
+      setProfile(profileBeforeModalRef.current);
+      redrawRef.current();
+    }
     setSuggestModalOpen(false);
     discoverBtnRef.current?.focus();
   };
@@ -1703,7 +1741,7 @@ export default function MapView() {
           onAnswer={(id, value) =>
             setDraftAnswers((a) => ({ ...a, [id]: value }))
           }
-          onProfile={setDraftProfile}
+          onProfile={previewProfile}
           onSubmit={submitSuggest}
           onClose={closeSuggestModal}
         />
