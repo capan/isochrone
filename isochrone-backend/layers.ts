@@ -79,6 +79,30 @@ export const REACH_SPREAD_METERS = 700;
 // to a few hundred candidates without the O(n²) distance comparisons.
 export const REACH_SPREAD_DEGREES = 0.01;
 
+// How far a POI may be from the graph vertex it is wired to. Beyond this it is
+// dropped from the source set entirely rather than snapped.
+//
+// This is not a tuning knob, it is a correctness guard, and it was added after
+// the field shipped wrong. The super-source wires each source vertex at ZERO
+// cost, so an unbounded nearest-vertex snap makes a POI contribute as if it sat
+// on that vertex no matter how far away it really is. Berlin's area row is a
+// bounding BOX, which covers Brandenburg land with no imported streets, so
+// Falkensee POIs were snapping onto whichever Berlin boundary vertex was
+// closest and stacking zeros on it.
+//
+// Measured on the complete field: snap distance p50 25.7m, p99 226.1m, then
+// p99.5 2861.2m and a worst case of 15,711m — bimodal, with a 12x gap between
+// the real POIs and the teleported ones, so anything from 300m to 1km separates
+// them. 300m keeps everything up to p99 and drops 296 of 24,986 POIs across the
+// four questionnaire layers.
+//
+// What it cost to not have this: vertex 70954 (a path dead end 1,764m from the
+// nearest junction, in an allotment strip off Havelländer Weg) collected a zero
+// for all four layers and scored a perfect 1.0, while the nearest real shop was
+// 2.8km away. 274 cells were wrong this way — 0.05% of rows, and 100% of what a
+// user saw, because a perfect score sorts to the top of every ranking.
+export const REACH_MAX_SNAP_METERS = 300;
+
 // Weights are answers to questions, not free parameters: a closed 0..3 range is
 // what keeps the whole answer space enumerable (648 combinations since T-017
 // added the dog household option and the bike profile; 324 before), which is

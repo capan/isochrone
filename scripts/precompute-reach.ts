@@ -81,6 +81,7 @@ const {
   REACH_PROFILES,
   REACH_CAP_SECONDS,
   REACH_CELL_DEGREES,
+  REACH_MAX_SNAP_METERS,
   costExpr,
 } = layers;
 type ReachLayer = keyof typeof REACH_LAYERS;
@@ -214,6 +215,16 @@ async function buildSourceVertices(
   // traversal below is wired to. DISTINCT because several POIs commonly snap
   // to the same nearest vertex (a row of shops on one street), and a vertex
   // wired in twice would cost nothing extra but is worth not doing.
+  //
+  // ST_DWithin bounds the snap at REACH_MAX_SNAP_METERS. Without it the field
+  // ships wrong, not merely imprecise: the super-source wires every source
+  // vertex at zero cost, so a POI is treated as sitting ON its nearest vertex
+  // however far away it actually is, and a.bbox is a rectangle that covers
+  // Brandenburg land with no imported streets. See REACH_MAX_SNAP_METERS in
+  // layers.ts for the measured distribution and the damage this did.
+  //
+  // geography, not geometry: on 4326 geometry ST_DWithin's units are degrees,
+  // and 300 degrees would silently accept everything.
   await client.query(`DROP TABLE IF EXISTS src`);
   await client.query(
     `CREATE TEMP TABLE src AS
@@ -221,22 +232,44 @@ async function buildSourceVertices(
          FROM public.pois p
          JOIN public.areas a ON a.schema_name = $2
          JOIN LATERAL (
-           SELECT v.id AS vid
+           SELECT v.id AS vid, v.geom
              FROM ${SCHEMA}.ways_vertices_pgr v
             WHERE v.main_component
             ORDER BY v.geom <-> p.geom
             LIMIT 1
          ) nearest ON true
-        WHERE p.kind = ANY($1::text[]) AND ST_Contains(a.bbox, p.geom)`,
-    [kinds, SCHEMA]
+        WHERE p.kind = ANY($1::text[])
+          AND ST_Contains(a.bbox, p.geom)
+          AND ST_DWithin(nearest.geom::geography, p.geom::geography, $3)`,
+    [kinds, SCHEMA, REACH_MAX_SNAP_METERS]
   );
   const vertexCount = await client.query<{ n: number }>(
     `SELECT count(*)::int AS n FROM src`
   );
 
+  // Count the POIs the snap guard threw away, per layer, because a layer that
+  // suddenly drops a lot of them means the graph and the POI set disagree about
+  // where the city is — worth seeing in the log rather than inferring later.
+  const dropped = await client.query<{ n: number }>(
+    `SELECT count(*)::int AS n
+       FROM public.pois p
+       JOIN public.areas a ON a.schema_name = $2
+       JOIN LATERAL (
+         SELECT v.geom
+           FROM ${SCHEMA}.ways_vertices_pgr v
+          WHERE v.main_component
+          ORDER BY v.geom <-> p.geom
+          LIMIT 1
+       ) nearest ON true
+      WHERE p.kind = ANY($1::text[])
+        AND ST_Contains(a.bbox, p.geom)
+        AND NOT ST_DWithin(nearest.geom::geography, p.geom::geography, $3)`,
+    [kinds, SCHEMA, REACH_MAX_SNAP_METERS]
+  );
+
   console.log(
     `${layer}/${profile}: ${poiCount.rows[0].n} POIs -> ${vertexCount.rows[0].n} distinct vertices ` +
-      `(snapping is free — 1,405 supermarkets measured at 1.2s)`
+      `(${dropped.rows[0].n} dropped as further than ${REACH_MAX_SNAP_METERS}m from the graph)`
   );
   return vertexCount.rows[0].n;
 }

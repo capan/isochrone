@@ -380,5 +380,36 @@ for (const [profile, w] of [["bike", "school:2,health:2,dining:1"], ["walk", "sc
   }
 }
 
-console.log(`\n${14 - failed}/${14}`);
+// 15. End to end: a suggested place must be somewhere you can actually walk
+//     from. This is the assertion that would have caught the shipped bug —
+//     everything else passed while the top result was an allotment strip off
+//     Havelländer Weg whose isochrone was empty.
+//
+//     The cause was an unbounded POI-to-vertex snap (see REACH_MAX_SNAP_METERS
+//     in layers.ts): 84 POIs from up to 3,950m away snapped onto one dead-end
+//     path vertex, which then read 0s for every layer and scored a perfect 1.0.
+//     Scoring the answer was never wrong; the source set was. So assert against
+//     the routing engine, not against the reach table that produced the answer.
+{
+  const res = await suggest({ profile: "walk", w: "dining:3,greenspace:3,groceries:3,health:3" });
+  const cells = res.body.cells ?? [];
+  const top = cells[0];
+  if (!top) {
+    check(false, "top suggestion exists to route from", "no cells returned");
+  } else {
+    const iso = await fetch(
+      `${API}/api/isochrone?lat=${top.lat}&lon=${top.lon}&profile=walk&minutes=15`
+    );
+    const geo = (await iso.json()).geojson;
+    const bands = geo?.features?.length ?? 0;
+    check(
+      bands > 0,
+      "top suggestion is walkable — its own isochrone is non-empty",
+      `#1 ${top.lat},${top.lon} score ${top.score} → ${bands} bands`
+    );
+  }
+}
+
+const TOTAL = 15;
+console.log(`\n${TOTAL - failed}/${TOTAL}`);
 process.exit(failed ? 1 : 0);
