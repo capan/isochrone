@@ -1366,8 +1366,14 @@ const reachableEdgesSql = (
       'SELECT id::integer AS id, source::integer, target::integer,
         ${costExpr(profile)} AS cost, ${costExpr(profile)} AS reverse_cost
        FROM ${schema}.ways WHERE ${bbox}',
-      (SELECT id FROM ${schema}.ways_vertices_pgr WHERE main_component
-        ORDER BY geom <-> ST_SetSRID(ST_MakePoint(${lon.toFixed(6)}, ${lat.toFixed(
+      (SELECT v.id FROM ${schema}.ways_vertices_pgr v
+        WHERE v.main_component
+          AND EXISTS (
+            SELECT 1 FROM ${schema}.ways w
+             WHERE (w.source = v.id OR w.target = v.id)
+               AND (${costExpr(profile)}) > 0
+          )
+        ORDER BY v.geom <-> ST_SetSRID(ST_MakePoint(${lon.toFixed(6)}, ${lat.toFixed(
     6
   )}), 4326) LIMIT 1)::integer,
       ${maxCost}::double precision)
@@ -1401,10 +1407,12 @@ app.get("/api/amenities", async (req: any, res: any) => {
   const limit = Math.min(3000, parseInt(req.query.limit ?? "3000", 10) || 3000);
 
   const { schema, poisLoaded } = await resolveSchema(lat, lon);
-  // `poi2` since poisLoaded joined the body: entries cached under the old key
-  // answer without the field, and a 24h TTL outlives any deploy. Bump the
-  // prefix on the next shape change too — it beats remembering to flush.
-  const key = `poi2:${schema}:${lat.toFixed(5)},${lon.toFixed(
+  // `poi3` since the vertex snap became profile-aware: a click that had landed
+  // on a cycleway-only vertex cached an empty place list on foot, and those are
+  // the entries the fix repairs. The original `poi2` bump was for poisLoaded
+  // joining the body. A 24h TTL outlives any deploy, so bump the prefix on the
+  // next change too — it beats remembering to flush.
+  const key = `poi3:${schema}:${lat.toFixed(5)},${lon.toFixed(
     5
   )}:${minutes}:${profile}:${kinds.join("|")}:${limit}`;
 
@@ -1862,7 +1870,10 @@ app.get("/api/isochrone", async (req: any, res: any) => {
   // coordinates snap to a different vertex id in a different schema.
   const { schema, matched } = await resolveSchema(latNum, lonNum);
 
-  const vertexKey = `vertex:${schema}:${latNum.toFixed(5)},${lonNum.toFixed(5)}`;
+  // Profile is part of the key because the snap below is now profile-dependent:
+  // the same click resolves to different vertices for walk and bike, and a
+  // shared key would serve one profile's answer to the other.
+  const vertexKey = `vertex2:${schema}:${profile}:${latNum.toFixed(5)},${lonNum.toFixed(5)}`;
   let vertexIdStr = await cacheGet(vertexKey);
   let vertexId: number;
 
@@ -1875,10 +1886,30 @@ app.get("/api/isochrone", async (req: any, res: any) => {
     // main_component only: the geometrically nearest vertex is often on a
     // disconnected fragment (5.7% of Berlin's vertices), which routes nowhere.
     // Populated by scripts/main_component.sql.
+    //
+    // main_component is necessary but NOT sufficient, because it is computed on
+    // the profile-blind graph while costExpr removes edges per profile. A vertex
+    // whose only edges are cycleway (tag_id 113) is well connected in general and
+    // completely isolated on foot, so the traversal reaches nothing and the
+    // endpoint returns 200 with zero bands — indistinguishable from "nowhere to
+    // go" and impossible to act on. Measured on Berlin: 14,926 of 618,345
+    // main_component vertices are stranded on foot (2.4%) and 36,796 for
+    // wheelchair (6.0%). Reported case: 52.546,13.36 in Wedding snapped to
+    // vertex 585731, 22m away, both of whose edges are cycleway.
+    //
+    // So require at least one edge this profile can actually use. The KNN scan
+    // stops at the first vertex that passes, which for most clicks is still the
+    // nearest one; idx_berlin_v2_source/target make the check cheap.
     const vertexRes = await pool.query(
-      `SELECT id, ST_Distance(geom::geography, ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography) AS dist_m
-       FROM ${schema}.ways_vertices_pgr WHERE main_component
-       ORDER BY geom <-> ST_SetSRID(ST_MakePoint($1, $2), 4326) LIMIT 1`,
+      `SELECT v.id, ST_Distance(v.geom::geography, ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography) AS dist_m
+       FROM ${schema}.ways_vertices_pgr v
+       WHERE v.main_component
+         AND EXISTS (
+           SELECT 1 FROM ${schema}.ways w
+            WHERE (w.source = v.id OR w.target = v.id)
+              AND (${costExpr(profile as ProfileName)}) > 0
+         )
+       ORDER BY v.geom <-> ST_SetSRID(ST_MakePoint($1, $2), 4326) LIMIT 1`,
       [lonNum, latNum]
     );
     const row = vertexRes.rows[0];
@@ -1940,7 +1971,13 @@ app.get("/api/isochrone", async (req: any, res: any) => {
       6
     )}, ${latNum.toFixed(6)}), 4326), ` +
     `${dLon.toFixed(6)}, ${dLat.toFixed(6)})`;
-  const redisKey = `net:${schema}:${latNum.toFixed(5)},${lonNum.toFixed(
+  // net2: bumped when the vertex snap became profile-aware. Every answer cached
+  // under net: for a click that had snapped to a profile-stranded vertex is an
+  // empty FeatureCollection, and those are exactly the ones the fix repairs —
+  // leaving the prefix alone would have served the bug for another 24 hours.
+  // Same precedent as poi2 and suggest3: bump whenever the computation behind
+  // the value changes, not just its shape.
+  const redisKey = `net2:${schema}:${latNum.toFixed(5)},${lonNum.toFixed(
     5
   )}:${duration}:${profile}`;
 
