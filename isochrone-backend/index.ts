@@ -1707,11 +1707,17 @@ const scoreSuggestions = async (profile: string, entries: [string, number][]) =>
      ),
      scored AS (
        SELECT r.cell_id,
+              -- float8 throughout, not numeric. Postgres's numeric ln() is
+              -- arbitrary-precision and measured 30x slower than the float8 one
+              -- (2.12s vs 0.07s over 500k rows), which alone took a cold scoring
+              -- query from ~1.0s to ~3.5s and would have tripled the startup warm
+              -- pass. Nothing here needs exact decimal arithmetic — the result is
+              -- rounded to 4 places and used to sort.
               (SUM(
                  wt.w
-                 * GREATEST(0, 1 - r.seconds::numeric / $3)
-                 * ($9::numeric + (1 - $9::numeric) * LEAST(1,
-                     ln(1 + COALESCE(r.nearby, pl.p)::numeric) / ln(1 + pl.p)))
+                 * GREATEST(0, 1 - r.seconds::float8 / $3::float8)
+                 * ($9::float8 + (1 - $9::float8) * LEAST(1::float8,
+                     ln(1 + COALESCE(r.nearby, pl.p)::float8) / ln(1 + pl.p::float8)))
                ) / $4)::double precision AS score,
               jsonb_object_agg(r.layer, r.seconds) AS layers,
               jsonb_object_agg(r.layer, COALESCE(r.nearby, 0)) AS nearby
@@ -2311,9 +2317,18 @@ const warmSuggestCache = async () => {
     // of warming rather than by a second sweep: 275 of them across all 648
     // answers, which is the whole naming budget (see fillPlaceNames).
     const everShown = new Map<string, { lat: number; lon: number }>();
+    // Different answers collapse onto the same cache key — "not really" and
+    // "not much" both drop their layer, and mergeWeightsMax folds overlapping
+    // household/greenspace picks together. 648 answers, 501 distinct keys, so a
+    // naive loop spent 23% of the pass recomputing scores it had already cached.
+    // Cheap to skip now that each query is a full scan of the reach field.
+    const warmed = new Set<string>();
     for (const answer of WARM_ANSWERS) {
       const entries = normalizeWeights(answer.weights);
       if (!entries.length) continue; // no combination above produces this; kept defensive
+      const key = suggestCacheKey(answer.profile, entries);
+      if (warmed.has(key)) continue;
+      warmed.add(key);
       try {
         const body = await scoreSuggestions(answer.profile, entries);
         for (const c of (body as any).cells ?? [])
@@ -2326,9 +2341,9 @@ const warmSuggestCache = async () => {
       }
     }
     console.log(
-      `🔥 suggest warm pass done: ${WARM_ANSWERS.length} answer sets in ${
-        Date.now() - start
-      }ms`
+      `🔥 suggest warm pass done: ${warmed.size} distinct keys from ${
+        WARM_ANSWERS.length
+      } answer sets in ${Date.now() - start}ms`
     );
 
     // Guard the empty case: if every answer failed, `VALUES ` below has nothing
