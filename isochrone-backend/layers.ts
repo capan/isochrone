@@ -110,6 +110,130 @@ export const REACH_SPREAD_DEGREES = 0.01;
 // tuning — it only has to land in the gap.
 export const MAX_SNAP_METERS = 500;
 
+// --- density (T-019) --------------------------------------------------------
+//
+// "Graph gates, density ranks." Seconds-to-nearest answers "is there one?", and
+// in a dense city the answer is always yes — four cells scoring exactly 1.0000
+// held 308, 111, 75 and 32 restaurants within 800m, and the score called them
+// identical. Reachability is a good gate and a useless ranking.
+//
+// So each reach row also carries `nearby`: how many POIs of that layer sit
+// within the profile's density radius. Straight-line, not graph distance.
+// Validated rather than assumed: Spearman rank correlation against the
+// graph-true reachable count over a sample of cells is 0.983, while the absolute
+// ratio wanders between 0.50 and 1.52. Ranking needs the order, not the
+// magnitude, and the graph still decides what is reachable at all — a layer with
+// no reach row contributes nothing however many POIs are nearby.
+export const DENSITY_DETOUR_FACTOR = 0.75;
+
+// decay x speed is how far the score reaches; the detour factor turns that
+// along-the-graph distance into the straight-line radius that contains it.
+// Measured: walk 945m, wheelchair 608m, bike 945m — walk and bike come out
+// identical, which is not a coincidence but ADR-0017 working as intended (bike's
+// 300s decay was chosen to cover the same footprint as walk's 900s).
+export const densityRadiusMeters = (profile: ReachProfile) =>
+  Math.round(
+    REACH_DECAY_SECONDS[profile] * PROFILES[profile].speed * DENSITY_DETOUR_FACTOR
+  );
+
+// What counts as "plenty" per layer, so one layer cannot swamp the others —
+// dining is 27x school, so a shared constant would make every score a dining
+// score. Measured over all 134,280 Berlin cells at the walk radius:
+//
+//   layer          p90   p99   p99.9   max
+//   dining         181   486     584   621
+//   greenspace      49   338     775   784
+//   groceries       52   110     140   155
+//   health          29    81     116   145
+//   playground      53    77      95   106
+//   kindergarten    27    50      60    69
+//   school          11    18      22    25
+//
+// p99, and the first attempt used p90 and did not work. The ten results of any
+// query are the densest cells in the city by construction — they live in the
+// extreme tail, not at p90 — so a p90 bar capped every one of them at 1.0 and
+// reproduced the exact saturation density was added to fix: groceries-only
+// returned ten cells holding 55 to 140 shops, all scoring 1.0000. p99 puts that
+// same spread across 0.86 to 1.00. Not the max, which is outlier-driven
+// (greenspace 784 is one cell ringed by many tiny garden polygons).
+//
+// Measured at the walk radius and reused for all profiles. Wheelchair's radius
+// is smaller so its counts run lower against the same bar, which shifts its
+// absolute scores down but not its ranking — every cell in one query is compared
+// at the same radius, and ranking is all this feeds.
+export const DENSITY_PLENTY: Record<keyof typeof REACH_LAYERS, number> = {
+  dining: 486,
+  greenspace: 338,
+  groceries: 110,
+  health: 81,
+  playground: 77,
+  kindergarten: 50,
+  school: 18,
+};
+
+// Reachability keeps half the weight, density earns the other half:
+//
+//   layer_score = reach x (DENSITY_FLOOR + (1 - DENSITY_FLOOR) x density)
+//
+// Multiplying by density alone would zero a layer that IS reachable but sits in
+// a thin area, and a straight-line radius is not exact enough to justify that.
+// The floor keeps the graph primary and lets density order what the gate lets
+// through. Measured on the four cells that used to tie at 1.0000: they now score
+// 1.00, 0.95, 0.91, 0.83 on dining.
+export const DENSITY_FLOOR = 0.5;
+
+// The one place this is expressed. Both the server's backfill and the offline
+// precompute call it, because T-018 was caused by a guard that existed in
+// index.ts where the precompute could not see it.
+//
+// Projected to EPSG:25833 (UTM 33N, correct for Berlin) and compared as planar
+// metres. NOT geography: the same join with ::geography did not finish in ten
+// minutes, because each of ~7.7M candidate pairs pays spheroid math.
+//
+// Written against the base tables on purpose. The first version wrapped both
+// sides in CTEs, which have no indexes, so the spatial join degraded to a nested
+// loop and one profile was still running after 11 minutes. `ST_Transform` is
+// immutable enough to index, so idx_pois_geom_utm and idx_reach_cells_geom_utm
+// (created as migrations in index.ts) let the planner do this as an index join
+// instead — 5.8s for dining in the temp-table equivalent. Both indexes must
+// exist or this is slow rather than wrong; the migration log says if they do not.
+export const nearbyUpdateSql = (schema: string, profile: ReachProfile) => {
+  const radius = densityRadiusMeters(profile);
+  const layerValues = Object.entries(REACH_LAYERS)
+    .map(([layer, kinds]) => `('${layer}', ARRAY[${kinds.map((k) => `'${k}'`).join(",")}])`)
+    .join(", ");
+  return `
+    WITH lk(layer, kinds) AS (VALUES ${layerValues}),
+    counted AS (
+      SELECT c.id AS cell_id, lk.layer, count(*)::int AS n
+        FROM ${schema}.reach_cells c
+        JOIN lk ON true
+        JOIN public.pois p
+          ON p.kind = ANY(lk.kinds)
+         AND ST_DWithin(
+               ST_Transform(c.geom, 25833),
+               ST_Transform(p.geom, 25833),
+               ${radius})
+       GROUP BY c.id, lk.layer
+    )
+    UPDATE ${schema}.reach r
+       SET nearby = LEAST(counted.n, 32767)
+      FROM counted
+     WHERE r.cell_id = counted.cell_id
+       AND r.layer = counted.layer
+       AND r.profile = '${profile}';
+
+    -- Second statement, and not optional. The join above only touches rows that
+    -- HAVE a nearby POI, so without this every "reachable within the cap but
+    -- nothing inside the density radius" row stays NULL — 72,339 of them for
+    -- walk. NULL has to keep meaning exactly one thing ("not backfilled"),
+    -- because scoreSuggestions reads it as "score as if density did not exist";
+    -- letting it also mean zero would score the emptiest cells as the fullest.
+    UPDATE ${schema}.reach
+       SET nearby = 0
+     WHERE profile = '${profile}' AND nearby IS NULL`;
+};
+
 // Coverage is drawn from the graph's own footprint, not from an area's bbox.
 //
 // A bbox is a rectangle and a city is not. Berlin's bbox is 1,793 km² while the

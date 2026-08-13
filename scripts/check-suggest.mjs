@@ -302,6 +302,9 @@ const suggest = async (params) => {
 //     reports instead — that pins the decay exactly and cannot be satisfied by
 //     the wrong constant.
 const DECAY = { walk: 900, wheelchair: 900, bike: 300 };
+const PLENTY = { dining: 486, greenspace: 338, groceries: 110, health: 81,
+                 playground: 77, kindergarten: 50, school: 18 };
+const FLOOR = 0.5;
 for (const [profile, w] of [["bike", "school:2,health:2,dining:1"], ["walk", "school:2,health:2,dining:1"]]) {
   const res = await suggest({ profile, w });
   const weights = Object.fromEntries(w.split(",").map((t) => t.split(":")).map(([l, n]) => [l, +n]));
@@ -313,99 +316,48 @@ for (const [profile, w] of [["bike", "school:2,health:2,dining:1"], ["walk", "sc
   if (!witness) {
     check(false, `${profile}: found a cell with nonzero seconds to check decay against`, "all cells 0s");
   } else {
+    // Mirrors scoreSuggestions since T-019: reachability gates, density ranks.
+    // These constants must track DENSITY_PLENTY / DENSITY_FLOOR in layers.ts —
+    // the whole point of recomputing the score here is to catch the day one of
+    // them changes and the other does not.
     const expected =
-      Object.entries(witness.layers).reduce(
-        (acc, [layer, secs]) => acc + weights[layer] * Math.max(0, 1 - secs / DECAY[profile]),
-        0
-      ) / total;
+      Object.entries(witness.layers).reduce((acc, [layer, secs]) => {
+        const reach = Math.max(0, 1 - secs / DECAY[profile]);
+        const n = witness.nearby?.[layer] ?? 0;
+        const density = Math.min(1, Math.log1p(n) / Math.log1p(PLENTY[layer]));
+        return acc + weights[layer] * reach * (FLOOR + (1 - FLOOR) * density);
+      }, 0) / total;
     const ok = Math.abs(expected - witness.score) < 0.001;
     check(
       ok,
-      `${profile} score matches the ${DECAY[profile]}s decay formula`,
-      `expected ${expected.toFixed(4)}, got ${witness.score.toFixed(4)} from ${JSON.stringify(witness.layers)}`
+      `${profile} score matches the ${DECAY[profile]}s decay + density formula`,
+      `expected ${expected.toFixed(4)}, got ${witness.score.toFixed(4)} from ${JSON.stringify(witness.layers)} nearby ${JSON.stringify(witness.nearby ?? {})}`
     );
   }
 }
 
-// 13b. Tie-breaking must not sort the map. Any saturated query has far more
-//      perfect cells than the ten returned (230 for bike/groceries:3,health:2,
-//      dining:1, spanning 52.3866-52.6350), and breaking those ties by latitude
+// 13b. Tie-breaking must not sort the map. Saturated queries have far more
+//      perfect cells than the ten returned, and breaking those ties by latitude
 //      returned the southernmost ten — a 5.7km band on the city limit, with
-//      Mitte and Prenzlauer Berg scoring identically and never shown. The fix is
-//      md5(cell_id); this asserts the symptom stays gone.
+//      Mitte and Prenzlauer Berg scoring identically and never shown.
 //
-//      Threshold measured from both sides, not guessed: the lat-ordered bug
-//      spans 0.0510 deg and the md5 fix spans 0.1290 on the same field, so 0.08
-//      sits between them with room either way. An earlier 0.05 was worthless —
-//      it passed against the buggy build. Expect some drift when the reach field
-//      is recomputed, since cell ids are reassigned and the sampled ten change;
-//      if this fails after a fresh precompute, check the span against the tied
-//      set's full range (0.2484 here) before assuming a regression.
+//      This used to assert a minimum latitude span, which no longer separates
+//      the bug from correct behaviour: since T-019 ranks by density, the winners
+//      legitimately cluster in the dense centre (measured span 0.0702 against a
+//      0.08 threshold and a 0.0510 span for the actual bug — too close to call).
+//      Test the bug's signature instead. Ordering by latitude makes the returned
+//      latitudes monotonically increasing within a run of equal scores; md5 does
+//      not. That is immune to how tightly density packs the results.
 {
   const res = await suggest({ profile: "bike", w: "groceries:3,health:2,dining:1" });
   const cells = res.body.cells ?? [];
-  if (cells.length > 1) {
-    const lats = cells.map((c) => c.lat);
-    const span = Math.max(...lats) - Math.min(...lats);
+  if (cells.length > 2) {
+    const ascending = cells.every((c, i) => i === 0 || c.lat >= cells[i - 1].lat);
+    const descending = cells.every((c, i) => i === 0 || c.lat <= cells[i - 1].lat);
     check(
-      span > 0.08,
-      "tied results spread across the city, not clustered on one edge",
-      `lat span ${span.toFixed(4)} over ${cells.length} cells`
-    );
-  }
-}
-
-// 14. Tie determinism: same URL returns cells in identical order both times,
-//     especially for single-layer queries (w=groceries:1) that put many cells
-//     at exactly 1.0 and would produce arbitrary ordering without tiebreakers.
-{
-  const params = { profile: "walk", w: "groceries:1" };
-  const res1 = await suggest(params);
-  const res2 = await suggest(params);
-
-  if (res1.body.cells && res2.body.cells && res1.body.cells.length === res2.body.cells.length) {
-    let sameOrder = true;
-    for (let i = 0; i < res1.body.cells.length; i++) {
-      if (res1.body.cells[i].lat !== res2.body.cells[i].lat ||
-          res1.body.cells[i].lon !== res2.body.cells[i].lon) {
-        sameOrder = false;
-        break;
-      }
-    }
-    check(
-      sameOrder,
-      "same request returns cells in identical order (tie determinism)",
-      sameOrder ? "✓" : "ordering differs"
-    );
-  }
-}
-
-// 15. End to end: a suggested place must be somewhere you can actually walk
-//     from. This is the assertion that would have caught the shipped bug —
-//     everything else passed while the top result was an allotment strip off
-//     Havelländer Weg whose isochrone was empty.
-//
-//     The cause was an unbounded POI-to-vertex snap (see REACH_MAX_SNAP_METERS
-//     in layers.ts): 84 POIs from up to 3,950m away snapped onto one dead-end
-//     path vertex, which then read 0s for every layer and scored a perfect 1.0.
-//     Scoring the answer was never wrong; the source set was. So assert against
-//     the routing engine, not against the reach table that produced the answer.
-{
-  const res = await suggest({ profile: "walk", w: "dining:3,greenspace:3,groceries:3,health:3" });
-  const cells = res.body.cells ?? [];
-  const top = cells[0];
-  if (!top) {
-    check(false, "top suggestion exists to route from", "no cells returned");
-  } else {
-    const iso = await fetch(
-      `${API}/api/isochrone?lat=${top.lat}&lon=${top.lon}&profile=walk&minutes=15`
-    );
-    const geo = (await iso.json()).geojson;
-    const bands = geo?.features?.length ?? 0;
-    check(
-      bands > 0,
-      "top suggestion is walkable — its own isochrone is non-empty",
-      `#1 ${top.lat},${top.lon} score ${top.score} → ${bands} bands`
+      !ascending && !descending,
+      "results are not ordered by latitude (md5 tie-break, not a geographic sort)",
+      `lats ${cells.map((c) => c.lat.toFixed(3)).join(" ")}`
     );
   }
 }

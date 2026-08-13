@@ -17,6 +17,9 @@ import {
   REACH_SPREAD_DEGREES,
   REACH_SPREAD_METERS,
   REACH_MAX_WEIGHT,
+  DENSITY_PLENTY,
+  DENSITY_FLOOR,
+  nearbyUpdateSql,
   MAX_SNAP_METERS,
   COVERAGE_GRID_DEGREES,
   COVERAGE_EXPAND_DEGREES,
@@ -282,6 +285,58 @@ const ensureAreasTable = async () => {
     .catch((err) =>
       console.log(`ℹ️ no ${DEFAULT_SCHEMA} schema for reach tables yet:`, err.message)
     );
+
+  // Each of these runs as its OWN statement, with its own catch, deliberately.
+  // Grouping migrations into one multi-statement query means the slowest one
+  // takes the rest down with it: `CREATE INDEX ... USING GIST` over 134,280 cells
+  // exceeds the 15s statement_timeout, and when it did, the `ALTER ... ADD COLUMN
+  // nearby` in the same block rolled back — which then failed all 648 warm-pass
+  // answers and, because that left the naming set empty, produced a `VALUES ()`
+  // syntax error three layers away. The same shape cost us the coverage column
+  // earlier (ADR-0020), so it is fixed here rather than noted again.
+  //
+  // statement_timeout is lifted per statement, on one dedicated client, because
+  // index builds are legitimately slower than any request should ever be.
+  const migrations: [string, string][] = [
+    [
+      "reach.nearby",
+      `ALTER TABLE ${DEFAULT_SCHEMA}.reach ADD COLUMN IF NOT EXISTS nearby smallint`,
+    ],
+    [
+      "reach_cells GIST",
+      `CREATE INDEX IF NOT EXISTS idx_reach_cells_geom
+         ON ${DEFAULT_SCHEMA}.reach_cells USING GIST (geom)`,
+    ],
+    // Functional indexes on the projected geometry. Without BOTH of these the
+    // density join has no index to use and falls back to a nested loop over
+    // 134,280 cells x 24,986 POIs — measured still running after 11 minutes,
+    // against 5.8s with them.
+    [
+      "reach_cells UTM GIST",
+      `CREATE INDEX IF NOT EXISTS idx_reach_cells_geom_utm
+         ON ${DEFAULT_SCHEMA}.reach_cells USING GIST (ST_Transform(geom, 25833))`,
+    ],
+    [
+      "pois UTM GIST",
+      `CREATE INDEX IF NOT EXISTS idx_pois_geom_utm
+         ON public.pois USING GIST (ST_Transform(geom, 25833))`,
+    ],
+  ];
+  for (const [label, sql] of migrations) {
+    const client = await pool.connect();
+    try {
+      await client.query("SET statement_timeout = 0");
+      await client.query(sql);
+    } catch (err) {
+      console.log(`ℹ️ migration ${label} skipped:`, (err as Error).message);
+    } finally {
+      // The pool reuses this connection for requests, where an unlimited
+      // statement_timeout is exactly what the 15s default exists to prevent.
+      await client.query("SET statement_timeout = '15s'").catch(() => {});
+      client.release();
+    }
+  }
+
   // The shipped city is a schema, not an imported area. Give it a row so the
   // map can draw every covered region from one endpoint instead of special
   // casing it. Harmless if the schema isn't present (fresh deployment).
@@ -384,6 +439,50 @@ const storeCoverage = async (areaId: number, schemaName: string) => {
     // A failed dissolve must not fail an import or block startup — the COALESCE
     // in /api/coverage keeps serving the bbox, which is what shipped before.
     console.error(`⚠️ coverage for ${schemaName} failed:`, (err as Error).message);
+  }
+};
+
+// Fills reach.nearby from THIS machine's public.pois (T-019). Deliberately
+// computed where it is served rather than shipped in the dump: the count is a
+// straight-line spatial join, cheap enough to redo (~6s per profile, measured),
+// and recomputing locally is what keeps density free of the build-vs-serve POI
+// drift that ADR-0022 records for `seconds`.
+//
+// Runs when any row is missing it — after a restore, or after the POI sweep has
+// changed what is on the ground. Uses nearbyUpdateSql from layers.ts so the
+// server and scripts/precompute-reach.ts cannot disagree about the radius or the
+// projection; a guard that lived in only one of them is what caused T-018.
+const backfillNearby = async () => {
+  try {
+    const todo = await pool.query<{ profile: string }>(
+      `SELECT DISTINCT profile FROM ${DEFAULT_SCHEMA}.reach WHERE nearby IS NULL`
+    );
+    if (!todo.rowCount) return;
+    const t0 = Date.now();
+    for (const { profile } of todo.rows) {
+      if (!(REACH_PROFILES as readonly string[]).includes(profile)) continue;
+      // Own client with the timeout lifted: this is a spatial join over every
+      // cell and every POI of seven layers — 5.8s for dining alone, measured —
+      // so it cannot run under the 15s request timeout. It is startup work, not
+      // request work, and nothing serves from it until it lands.
+      const client = await pool.connect();
+      try {
+        await client.query("SET statement_timeout = 0");
+        await client.query(nearbyUpdateSql(DEFAULT_SCHEMA, profile as ReachProfile));
+      } finally {
+        await client.query("SET statement_timeout = '15s'").catch(() => {});
+        client.release();
+      }
+    }
+    console.log(
+      `📊 density backfilled for ${todo.rowCount} profile(s) in ${Date.now() - t0}ms`
+    );
+  } catch (err) {
+    // Never fatal. A NULL nearby scores exactly as the field did before density
+    // existed (see COALESCE in scoreSuggestions), so the feature degrades to the
+    // old behaviour rather than breaking the endpoint.
+    if ((err as any).code === "42P01" || (err as any).code === "42703") return;
+    console.error("⚠️ density backfill failed:", (err as Error).message);
   }
 };
 
@@ -1520,8 +1619,11 @@ const normalizeWeights = (weights: Record<string, number>): [string, number][] =
 // table was reloaded with a different shape, which is the first condition
 // above, and it caught us anyway during local verification: 14/14 passed
 // against suggest2: entries warmed while the field was still half-computed.
+//
+// suggest4: density joined the formula (T-019), so every score changes and the
+// body gained a `nearby` key. Both reasons on their own would require this.
 const suggestCacheKey = (profile: string, entries: [string, number][]) =>
-  `suggest3:${profile}:${entries.map(([l, w]) => `${l}:${w}`).join(",")}`;
+  `suggest4:${profile}:${entries.map(([l, w]) => `${l}:${w}`).join(",")}`;
 
 // ST_SnapToGrid guarantees at most one candidate per coarse cell but nothing
 // about the gap BETWEEN cells — two candidates straddling a grid boundary can
@@ -1590,12 +1692,32 @@ const scoreSuggestions = async (profile: string, entries: [string, number][]) =>
     `WITH weights(layer, w) AS (
        SELECT unnest($1::text[]), unnest($2::int[])
      ),
+     -- T-019: reachability gates, density ranks. reach is the old term; the
+     -- density factor is DENSITY_FLOOR plus the rest earned by how many places
+     -- of that layer are nearby, log-scaled against the layer's own "plenty"
+     -- (DENSITY_PLENTY, the measured p90 — dining's 185 is 17x school's 11, so a
+     -- shared scale would make every score a dining score).
+     --
+     -- COALESCE(nearby, plenty) so a field whose density has not been backfilled
+     -- yet scores exactly as it did before this change, rather than collapsing to
+     -- the floor. log-scaled because the difference between 1 and 10 restaurants
+     -- matters and the difference between 300 and 310 does not.
+     plenty(layer, p) AS (
+       SELECT unnest($7::text[]), unnest($8::int[])
+     ),
      scored AS (
        SELECT r.cell_id,
-              (SUM(wt.w * GREATEST(0, 1 - r.seconds::numeric / $3)) / $4)::double precision AS score,
-              jsonb_object_agg(r.layer, r.seconds) AS layers
+              (SUM(
+                 wt.w
+                 * GREATEST(0, 1 - r.seconds::numeric / $3)
+                 * ($9::numeric + (1 - $9::numeric) * LEAST(1,
+                     ln(1 + COALESCE(r.nearby, pl.p)::numeric) / ln(1 + pl.p)))
+               ) / $4)::double precision AS score,
+              jsonb_object_agg(r.layer, r.seconds) AS layers,
+              jsonb_object_agg(r.layer, COALESCE(r.nearby, 0)) AS nearby
          FROM ${DEFAULT_SCHEMA}.reach r
          JOIN weights wt ON wt.layer = r.layer
+         JOIN plenty pl ON pl.layer = r.layer
         WHERE r.profile = $5
         GROUP BY r.cell_id
      ),
@@ -1607,7 +1729,7 @@ const scoreSuggestions = async (profile: string, entries: [string, number][]) =>
      -- 10 mutually-distant ones from.
      spread AS (
        SELECT DISTINCT ON (ST_SnapToGrid(c.geom, $6))
-              c.id AS cell_id, c.geom, s.score, s.layers
+              c.id AS cell_id, c.geom, s.score, s.layers, s.nearby
          FROM scored s
          JOIN ${DEFAULT_SCHEMA}.reach_cells c ON c.id = s.cell_id
         -- Score ties are broken deterministically, but deliberately NOT by
@@ -1634,17 +1756,34 @@ const scoreSuggestions = async (profile: string, entries: [string, number][]) =>
      SELECT ROUND(ST_Y(geom)::numeric, 6)::double precision AS lat,
             ROUND(ST_X(geom)::numeric, 6)::double precision AS lon,
             ROUND(score::numeric, 4)::double precision AS score,
-            layers
+            layers,
+            nearby
        FROM spread
       ORDER BY score DESC, md5(cell_id::text)
       LIMIT 200`,
-    [layers, weights, decaySeconds, totalWeight, profile, REACH_SPREAD_DEGREES]
+    [
+      layers,
+      weights,
+      decaySeconds,
+      totalWeight,
+      profile,
+      REACH_SPREAD_DEGREES,
+      layers,
+      layers.map((l) => DENSITY_PLENTY[l as keyof typeof REACH_LAYERS]),
+      DENSITY_FLOOR,
+    ]
   );
 
   // Greedy by score: r.rows is already ordered descending, so the first
   // accepted cell is always the best-scoring one, and every later accept is
   // the best-scoring cell that doesn't crowd an earlier pick.
-  const picked: { lat: number; lon: number; score: number; layers: Record<string, number> }[] = [];
+  const picked: {
+    lat: number;
+    lon: number;
+    score: number;
+    layers: Record<string, number>;
+    nearby: Record<string, number>;
+  }[] = [];
   for (const row of r.rows) {
     const tooClose = picked.some(
       (p) => haversineM(p.lat, p.lon, row.lat, row.lon) < REACH_SPREAD_METERS
@@ -1664,6 +1803,11 @@ const scoreSuggestions = async (profile: string, entries: [string, number][]) =>
       // cannot reach within REACH_CAP_SECONDS[profile], which is the point the
       // whole feature is built to make ("no pharmacy in 30 min").
       layers: row.layers,
+      // How many places of each layer are within the profile's density radius —
+      // the half of the score reachability cannot see (T-019). This is what
+      // separates a cell with 308 restaurants from one with 32 when both are
+      // standing on top of one.
+      nearby: row.nearby,
     })),
   };
   // Long TTL: the field only changes on reimport/reload, which the version
@@ -2187,6 +2331,13 @@ const warmSuggestCache = async () => {
       }ms`
     );
 
+    // Guard the empty case: if every answer failed, `VALUES ` below has nothing
+    // to interpolate and Postgres reports `syntax error at or near ")"` — which
+    // is what a missing reach.nearby column looked like from three layers away.
+    // An empty set here means the warm pass produced nothing, which the errors
+    // above have already said.
+    if (!everShown.size) return;
+
     // Not awaited: this is ~275 requests at Nominatim's 1 req/s, so about five
     // minutes. Startup must not wait for it, and results are useful unnamed.
     const unnamed = await pool.query<{ lat: string; lon: string }>(
@@ -2215,6 +2366,9 @@ const warmSuggestCache = async () => {
 
 ensureAreasTable()
   .then(backfillCoverage)
+  // Before the warm pass, not after: warming caches scored answers, and warming
+  // against NULL density would freeze 648 pre-density answers for 7 days.
+  .then(backfillNearby)
   .then(drainQueue)
   .then(warmSuggestCache)
   .catch((err) =>

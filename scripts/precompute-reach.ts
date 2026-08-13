@@ -82,6 +82,8 @@ const {
   REACH_CAP_SECONDS,
   REACH_CELL_DEGREES,
   MAX_SNAP_METERS,
+  nearbyUpdateSql,
+  densityRadiusMeters,
   costExpr,
 } = layers;
 type ReachLayer = keyof typeof REACH_LAYERS;
@@ -128,6 +130,12 @@ async function ensureTables(client: PoolClient) {
       PRIMARY KEY (cell_id, layer, profile)
     );
     CREATE INDEX IF NOT EXISTS idx_reach_layer_profile ON ${SCHEMA}.reach (layer, profile);
+    -- T-019 density, kept byte-identical with index.ts as the comment above
+    -- requires. Nullable: fillNearby populates it after the traversals, and the
+    -- server refills it from its own POIs wherever it is NULL.
+    ALTER TABLE ${SCHEMA}.reach ADD COLUMN IF NOT EXISTS nearby smallint;
+    CREATE INDEX IF NOT EXISTS idx_reach_cells_geom
+      ON ${SCHEMA}.reach_cells USING GIST (geom);
   `);
 }
 
@@ -328,6 +336,26 @@ async function runTraversal(
   }
 }
 
+// Density (T-019). Not a traversal — a straight-line spatial join, ~6s per
+// profile against Berlin, so it runs after the graph work rather than being
+// interleaved with it. Uses nearbyUpdateSql from layers.ts, the same statement
+// the server's backfillNearby runs, because two copies of a rule is how T-018
+// happened.
+//
+// The server refills this from its own POIs when it finds NULLs, so a transferred
+// field does not have to trust the build machine's POI set (ADR-0022). Filling it
+// here anyway means a locally-served field is correct immediately.
+async function fillNearby(client: PoolClient) {
+  for (const profile of REACH_PROFILES) {
+    const t0 = Date.now();
+    const r = await client.query(nearbyUpdateSql(SCHEMA, profile));
+    console.log(
+      `${profile}: density filled for ${r.rowCount} rows ` +
+        `(radius ${densityRadiusMeters(profile)}m, ${elapsed(t0)})`
+    );
+  }
+}
+
 async function printSummary(client: PoolClient) {
   const { rows } = await client.query<{
     layer: string;
@@ -403,6 +431,7 @@ async function main() {
       }
     }
 
+    await fillNearby(client);
     await printSummary(client);
   } finally {
     client.release();

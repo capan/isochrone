@@ -203,6 +203,9 @@ type SuggestCell = {
   // null until the backend has reverse-geocoded it; results are useful without
   // one, so this never blocks the response (see withPlaceNames in index.ts).
   name?: string | null;
+  // How many places of each layer sit within the profile's density radius. Absent
+  // on a field whose density has not been backfilled, so every read is optional.
+  nearby?: Partial<Record<ReachLayer, number>>;
 };
 
 // Sub-minute reach is the normal case in inner Berlin, not an edge case, and
@@ -1511,6 +1514,11 @@ export default function MapView() {
                               <span className="pl-kind suggest-layers">
                                 {suggestLayers.map((layer) => {
                                   const secs = c.layers[layer];
+                                  // The count is the half of the score the time
+                                  // cannot show: every top result is "<1′" from
+                                  // everything, and what separates them is 140
+                                  // shops nearby versus 55 (T-019).
+                                  const near = c.nearby?.[layer];
                                   return (
                                     <span
                                       key={layer}
@@ -1522,7 +1530,9 @@ export default function MapView() {
                                     >
                                       {secs == null
                                         ? `no ${LAYER_LABEL[layer]} in 30 min`
-                                        : `${LAYER_LABEL[layer]} ${reachLabel(secs)}`}
+                                        : `${LAYER_LABEL[layer]} ${reachLabel(secs)}${
+                                            near ? ` · ${near}` : ""
+                                          }`}
                                     </span>
                                   );
                                 })}
