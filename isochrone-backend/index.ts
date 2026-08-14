@@ -394,7 +394,7 @@ const ensureAreasTable = async () => {
 // lands on a disconnected fragment routes nowhere, so drawing it as covered
 // would reintroduce the same lie at a smaller scale.
 const computeCoverage = async (areaId: number, schemaName: string) => {
-  const r = await pool.query<{ g: string | null; had_vertices: boolean }>(
+  const r = await pool.query<{ g: string | null }>(
     `WITH g AS (
        SELECT DISTINCT ST_SnapToGrid(geom, $1) AS c
          FROM ${schemaName}.ways_vertices_pgr
@@ -403,6 +403,7 @@ const computeCoverage = async (areaId: number, schemaName: string) => {
      m AS (
        SELECT ST_SimplifyPreserveTopology(ST_Union(ST_Expand(c, $2)), $3) AS mask
          FROM g
+     )
      -- Clipped to the area's own bbox, which is not cosmetic. ST_Expand pushes
      -- the mask up to EXPAND degrees (~222m) past vertices on the box edge, and
      -- /api/isochrone selects a schema by bbox containment — so an unclipped
@@ -423,19 +424,31 @@ const computeCoverage = async (areaId: number, schemaName: string) => {
      -- geometry(MultiPolygon,4326) and its typmod coerces a bare Polygon on
      -- assignment — CollectionExtract itself can still return a plain Polygon
      -- for a non-collection input, so don't drop the cast if this expression
-     -- is ever reused against an untyped target. It also turns a fully
-     -- degenerate intersection (nothing polygonal survives) into an EMPTY
-     -- MultiPolygon rather than NULL, so had_vertices below is what tells
-     -- storeCoverage apart from the "no routable vertices at all" case — an
-     -- EMPTY mask must not be stored, or the area vanishes from the veil
-     -- instead of falling back to its bbox.
-     ), clip AS (
-       SELECT ST_CollectionExtract(ST_Intersection(m.mask, a.bbox), 3) AS g,
-              m.mask IS NOT NULL AS had_vertices
-         FROM m JOIN public.areas a ON a.id = $4
-     )
-     SELECT CASE WHEN ST_IsEmpty(g) THEN NULL ELSE g::text END AS g, had_vertices
-       FROM clip`,
+     -- is ever reused against an untyped target.
+     --
+     -- The COALESCE below is deliberate, not defensive filler: when there are
+     -- no routable vertices at all, or the dissolved mask does not reach its
+     -- own bbox, CollectionExtract(3) comes back NULL or an EMPTY collection.
+     -- That is stored as an EMPTY MultiPolygon rather than left NULL, on
+     -- purpose — the old pre-fix behaviour did this by accident (ST_Multi on
+     -- an empty intersection stringified to a value that slipped past the
+     -- "if (!mask)" guard) and it was the right outcome: ST_Union ignores
+     -- EMPTY inputs, so an EMPTY-masked area adds nothing to the veil, and
+     -- ST_Contains(EMPTY, point) is false (never NULL), so resolveSchema's
+     -- tie-break never prefers it either. Leaving it NULL instead makes
+     -- /api/coverage's COALESCE(coverage, bbox) fall back to a bbox the area
+     -- cannot route — measured locally on area_13 (70 main_component
+     -- vertices, dissolved mask disjoint from its own registered bbox: a
+     -- broken import): storing NULL there took check-coverage.mjs from 5/5 to
+     -- 4/5, refusing 52.1005,12.1027 "2236m away". An EMPTY mask is the
+     -- honest answer — "this import covers no ground" — and the UI already
+     -- offers a re-import for uncovered ground, which beats a patch of
+     -- undimmed map that refuses every click.
+     SELECT COALESCE(
+              ST_CollectionExtract(ST_Intersection(m.mask, a.bbox), 3),
+              ST_GeomFromText('MULTIPOLYGON EMPTY', 4326)
+            )::text AS g
+       FROM m JOIN public.areas a ON a.id = $4`,
     [
       COVERAGE_GRID_DEGREES,
       COVERAGE_EXPAND_DEGREES,
@@ -443,27 +456,26 @@ const computeCoverage = async (areaId: number, schemaName: string) => {
       areaId,
     ]
   );
-  const row = r.rows[0];
-  return {
-    mask: row?.g ?? null,
-    // True only when vertices existed but clipping left nothing polygonal —
-    // distinct from "no routable vertices" so storeCoverage can log the truth.
-    emptyIntersection: Boolean(row?.had_vertices) && !row?.g,
-  };
+  return r.rows[0]?.g ?? null;
 };
 
 const storeCoverage = async (areaId: number, schemaName: string) => {
   try {
-    const { mask, emptyIntersection } = await computeCoverage(areaId, schemaName);
-    if (emptyIntersection) {
-      console.warn(
-        `⚠️ ${schemaName}: mask/bbox intersection had no polygonal area, coverage left as bbox`
-      );
+    const mask = await computeCoverage(areaId, schemaName);
+    if (!mask) {
+      // Not "no routable vertices" any more — that computes to an EMPTY mask
+      // and is stored. Reaching here means the area row itself went missing
+      // between resolving it and dissolving it, so leave the column alone.
+      console.warn(`⚠️ ${schemaName}: no area row to dissolve, coverage unchanged`);
       return;
     }
-    if (!mask) {
-      console.warn(`⚠️ ${schemaName}: no routable vertices, coverage left as bbox`);
-      return;
+    // Worth a line, not a return: an EMPTY mask still gets stored (see the
+    // COALESCE comment above) but it means the dissolve found nothing to
+    // cover, which in practice has meant a broken import (area_13).
+    if (mask.includes("EMPTY")) {
+      console.warn(
+        `⚠️ ${schemaName}: coverage computed empty — mask does not reach its own bbox, likely a broken import`
+      );
     }
     await pool.query(`UPDATE public.areas SET coverage = $2 WHERE id = $1`, [
       areaId,
