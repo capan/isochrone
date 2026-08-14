@@ -4,3 +4,13 @@
 	encode zstd gzip
 	reverse_proxy app:3001
 }
+
+# This Caddy owns 80/443 on the box, so sibling services front through it rather
+# than shipping a second one: they join `isochrone_default` as an external
+# network and are reached by container name. EUDR_ADDRESS defaults to an
+# unpublished port (see compose), so local `docker compose up` stays a
+# single-site stack and never tries ACME for a hostname it can't answer for.
+{$EUDR_ADDRESS} {
+	encode zstd gzip
+	reverse_proxy eudr-app:8000
+}

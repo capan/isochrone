@@ -55,6 +55,9 @@ services:
     restart: unless-stopped
     environment:
       SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+      # eudr-forest-check fronts through this Caddy (its own stack joins
+      # isochrone_default). Default is an unpublished port = effectively off.
+      EUDR_ADDRESS: ${EUDR_ADDRESS:-:8080}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddydata:/data
