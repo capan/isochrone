@@ -412,7 +412,42 @@ const computeCoverage = async (areaId: number, schemaName: string) => {
      -- sampled points refused, one of them 6,086m from any street, because
      -- area_61's mask spilled outside area_61's bbox into a part of Berlin that
      -- Berlin's own mask correctly excludes.
-     SELECT ST_Multi(ST_Intersection(m.mask, a.bbox))::text AS g
+     --
+     -- ST_CollectionExtract(..., 3) rather than ST_Multi: where the mask meets
+     -- the bbox edge along a line or at a point, ST_Intersection returns a
+     -- GeometryCollection of polygons plus lower-dimensional scraps. ST_Multi
+     -- promotes that collection without flattening it, and the UPDATE into the
+     -- MultiPolygon column then raises "Geometry type (GeometryCollection) does
+     -- not match column type (MultiPolygon)" — measured on area_36 in prod.
+     -- CollectionExtract(3) keeps only the polygonal parts; ST_Multi on top of
+     -- it is redundant here specifically because the destination column is
+     -- geometry(MultiPolygon,4326) and its typmod coerces a bare Polygon on
+     -- assignment — CollectionExtract itself can still return a plain Polygon
+     -- for a non-collection input, so don't drop the cast if this expression
+     -- is ever reused against an untyped target.
+     --
+     -- The COALESCE below is deliberate, not defensive filler: when there are
+     -- no routable vertices at all, or the dissolved mask does not reach its
+     -- own bbox, CollectionExtract(3) comes back NULL or an EMPTY collection.
+     -- That is stored as an EMPTY MultiPolygon rather than left NULL, on
+     -- purpose — the old pre-fix behaviour did this by accident (ST_Multi on
+     -- an empty intersection stringified to a value that slipped past the
+     -- "if (!mask)" guard) and it was the right outcome: ST_Union ignores
+     -- EMPTY inputs, so an EMPTY-masked area adds nothing to the veil, and
+     -- ST_Contains(EMPTY, point) is false (never NULL), so resolveSchema's
+     -- tie-break never prefers it either. Leaving it NULL instead makes
+     -- /api/coverage's COALESCE(coverage, bbox) fall back to a bbox the area
+     -- cannot route — measured locally on area_13 (70 main_component
+     -- vertices, dissolved mask disjoint from its own registered bbox: a
+     -- broken import): storing NULL there took check-coverage.mjs from 5/5 to
+     -- 4/5, refusing 52.1005,12.1027 "2236m away". An EMPTY mask is the
+     -- honest answer — "this import covers no ground" — and the UI already
+     -- offers a re-import for uncovered ground, which beats a patch of
+     -- undimmed map that refuses every click.
+     SELECT COALESCE(
+              ST_CollectionExtract(ST_Intersection(m.mask, a.bbox), 3),
+              ST_GeomFromText('MULTIPOLYGON EMPTY', 4326)
+            )::text AS g
        FROM m JOIN public.areas a ON a.id = $4`,
     [
       COVERAGE_GRID_DEGREES,
@@ -428,8 +463,19 @@ const storeCoverage = async (areaId: number, schemaName: string) => {
   try {
     const mask = await computeCoverage(areaId, schemaName);
     if (!mask) {
-      console.warn(`⚠️ ${schemaName}: no routable vertices, coverage left as bbox`);
+      // Not "no routable vertices" any more — that computes to an EMPTY mask
+      // and is stored. Reaching here means the area row itself went missing
+      // between resolving it and dissolving it, so leave the column alone.
+      console.warn(`⚠️ ${schemaName}: no area row to dissolve, coverage unchanged`);
       return;
+    }
+    // Worth a line, not a return: an EMPTY mask still gets stored (see the
+    // COALESCE comment above) but it means the dissolve found nothing to
+    // cover, which in practice has meant a broken import (area_13).
+    if (mask.includes("EMPTY")) {
+      console.warn(
+        `⚠️ ${schemaName}: coverage computed empty — mask does not reach its own bbox, likely a broken import`
+      );
     }
     await pool.query(`UPDATE public.areas SET coverage = $2 WHERE id = $1`, [
       areaId,
@@ -528,7 +574,20 @@ const resolveSchema = async (lat: number, lon: number) => {
        SELECT id, schema_name, pois_at FROM public.areas
         WHERE status = 'ready'
           AND ST_Contains(bbox, ST_SetSRID(ST_MakePoint($1, $2), 4326))
-        ORDER BY ST_Area(bbox) ASC
+        -- Smallest-bbox-wins ties when two imports overlap and are the same
+        -- size: measured on prod, area_27 and area_33 both bbox to 24.98 km²
+        -- and both contain 40.8634,29.3493, so ST_Area alone flipped a coin
+        -- and landed on area_27, whose nearest routable vertex to that point
+        -- is 1715m — refused — while area_33's is 198m and its mask actually
+        -- covers the point. Preferring the area whose coverage contains the
+        -- point first means the resolver agrees with the veil, which is built
+        -- from this exact COALESCE(coverage, bbox) expression (see /api/coverage).
+        -- Safe under DESC only because public.areas.bbox is NOT NULL: that
+        -- keeps COALESCE(coverage, bbox) always a real geometry, so ST_Contains
+        -- here is never NULL — a NULL would sort ahead of true under DESC and
+        -- pick the wrong area.
+        ORDER BY ST_Contains(COALESCE(coverage, bbox), ST_SetSRID(ST_MakePoint($1, $2), 4326)) DESC,
+                 ST_Area(bbox) ASC
         LIMIT 1
      ), touch AS (
        UPDATE public.areas SET last_used_at = now()
