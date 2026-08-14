@@ -13,12 +13,15 @@
 // So this samples real points inside the served polygon and clicks them.
 const API = process.env.API ?? "http://localhost";
 
-// 20, not more, because this is the only check script that spends its budget on
-// one endpoint in a burst. The limiter allows 60 requests/minute per IP, and a
-// 60-sample run consumed the whole window — check-suggest.mjs and check.mjs then
-// failed with 429s that looked exactly like real regressions. Raise via
-// SAMPLES= only when running this script alone.
+// ~32 requests total by default: this is the only check script that spends its
+// budget on one endpoint in a burst. The limiter allows 60 requests/minute per IP,
+// and a 60-sample run (old ~20 req limit) consumed the whole window —
+// check-suggest.mjs and check.mjs then failed with 429s that looked exactly like
+// real regressions. With ~32 requests (SAMPLES=20 + DIM_SAMPLES=10), we stay
+// comfortably under the limit; if you see 429, wait ~65s rather than reporting
+// a failure. Raise via SAMPLES=/DIM_SAMPLES= only when running this script alone.
 const SAMPLES = parseInt(process.env.SAMPLES ?? "20", 10);
+const DIM_SAMPLES = parseInt(process.env.DIM_SAMPLES ?? "10", 10);
 
 let failed = 0;
 const check = (ok, label, extra = "") => {
@@ -86,6 +89,65 @@ check(
     : `${samples.length}/${samples.length} accepted`
 );
 
-const TOTAL = 5;
+// The other direction: dimmed ground (inside ready areas but outside all coverage
+// polygons) must be importable. Until T-023 fixed it, 1,185 km² of the 3,045 km²
+// of ready bboxes was dimmed AND unimportable — 39%, answering `no street nearby`
+// where the veil claimed nothing — and this script read 5/5 throughout, because
+// it only ever asserted the other direction. A person clicking Altlandsberg found
+// it. Not failures: `outside coverage` is correct (offers the import), and
+// HTTP 200 is fine (mask is approximate, dimmed point can still be within
+// MAX_SNAP_METERS of a street — that click works and nothing false is promised).
+const areasRes = await fetch(`${API}/api/areas`);
+check(areasRes.status === 200, "GET /api/areas", `HTTP ${areasRes.status}`);
+const areas = await areasRes.json();
+const readyAreas = Array.isArray(areas) ? areas.filter(a => a.status === "ready") : [];
+check(readyAreas.length > 0, "found ready areas for dimming check", `${readyAreas.length}`);
+
+// Sample points inside ready bboxes that fall outside all coverage polygons.
+// These are exactly the points the veil dims.
+const dimmedSamples = [];
+let dimGuard = 0;
+while (dimmedSamples.length < DIM_SAMPLES && dimGuard++ < DIM_SAMPLES * 400) {
+  const area = readyAreas[Math.floor(rnd() * readyAreas.length)];
+  const x = area.min_lon + rnd() * (area.max_lon - area.min_lon);
+  const y = area.min_lat + rnd() * (area.max_lat - area.min_lat);
+  // Keep only points outside every polygon's outer ring (holes are not dimmed).
+  if (polys.every(p => !inRing(p[0], x, y))) {
+    dimmedSamples.push([y, x]);
+  }
+}
+check(
+  dimmedSamples.length === DIM_SAMPLES,
+  `sampled ${DIM_SAMPLES} dimmed points`,
+  `${dimmedSamples.length}`
+);
+
+// A dimmed point that returns `no street nearby` is unimportable: the resolver
+// matched an area for a point the veil says is uncovered, but the UI offers the
+// import button only for `outside coverage`. That ground is unfixable.
+const unimportable = [];
+for (const [lat, lon] of dimmedSamples) {
+  const r = await fetch(
+    `${API}/api/isochrone?lat=${lat}&lon=${lon}&profile=walk&minutes=15`
+  );
+  if (r.status === 400) {
+    const body = await r.json().catch(() => ({}));
+    // body.error is the machine-readable code, body.detail the prose. Compare the
+    // code: detail carries a measured distance and is never equal to it, so
+    // reading detail here silently makes this assertion unfailable.
+    if (body.error === "no street nearby") {
+      unimportable.push({ lat, lon, detail: body.detail ?? body.error });
+    }
+  }
+}
+check(
+  unimportable.length === 0,
+  "every dimmed point is importable",
+  unimportable.length
+    ? `${unimportable.length}/${dimmedSamples.length} unimportable, e.g. ${unimportable[0].lat.toFixed(4)},${unimportable[0].lon.toFixed(4)}: ${unimportable[0].detail}`
+    : `${dimmedSamples.length}/${dimmedSamples.length} importable`
+);
+
+const TOTAL = 9;
 console.log(`\n${TOTAL - failed}/${TOTAL}`);
 process.exit(failed ? 1 : 0);
