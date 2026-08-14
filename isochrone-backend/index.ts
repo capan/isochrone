@@ -3,7 +3,7 @@ import express from "express";
 import { Pool } from "pg";
 import cors from "cors";
 import { createClient } from "redis";
-import rateLimit, { MemoryStore } from "express-rate-limit";
+import rateLimit, { MemoryStore, ipKeyGenerator } from "express-rate-limit";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -936,7 +936,24 @@ const parseBox = (body: any) => {
 // budget is small enough that spending a slot on an area which then fails to
 // build would lock someone out for an hour having got nothing.
 const importStore = new MemoryStore();
-const importKey = (req: any) => String(req.ip ?? "unknown");
+// ipKeyGenerator, not req.ip: an IPv6 caller is handed a whole prefix, so keying
+// on the address counted every one of them separately and the 3/hour cap was one
+// `::2` away from being no cap at all. express-rate-limit ships a validator for
+// exactly this mistake and it had been firing on every prod boot —
+// ERR_ERL_KEY_GEN_IPV6, logged with a stack trace pointing at this line. The box
+// has an AAAA record, so the path was reachable, and this is the one limiter
+// guarding a resource rather than CPU: Overpass traffic, disk against
+// MAX_IMPORT_MB, and eviction of somebody else's area.
+//
+// The helper collapses IPv6 to its /56 (the library's default) and leaves IPv4
+// untouched. /56 is coarser than the /64 a single link gets, so residential
+// customers behind one delegation share a bucket — the same trade the IPv4 key
+// already makes for everyone behind one NAT, and the safe direction to err.
+//
+// Also the key `pendingKey` stamps for refunds, so quota and refunds cannot
+// disagree about who a caller is.
+const importKey = (req: any) =>
+  req.ip ? ipKeyGenerator(String(req.ip)) : "unknown";
 const pendingKey = new Map<number, string>();
 
 const refundImport = (areaId: number) => {
