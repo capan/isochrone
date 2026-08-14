@@ -35,6 +35,17 @@ const suggest = async (params) => {
   };
 };
 
+const suggestGrid = async (params) => {
+  const url = `${API}/api/suggest-grid?${new URLSearchParams(params)}`;
+  const res = await fetch(url);
+  return {
+    url,
+    status: res.status,
+    body: await res.json(),
+    headers: res.headers,
+  };
+};
+
 // 1. available: true with non-empty cells array
 {
   const res = await suggest({ profile: "walk", w: "groceries:3,health:2,school:1" });
@@ -362,6 +373,140 @@ for (const [profile, w] of [["bike", "school:2,health:2,dining:1"], ["walk", "sc
   }
 }
 
-const TOTAL = 15;
+// 14. /api/suggest-grid basic checks: available and dimensions present
+{
+  const res = await suggestGrid({ profile: "walk", w: "groceries:3,school:2" });
+  check(res.status === 200, "GET /api/suggest-grid returns 200", `HTTP ${res.status}`);
+  check(res.body.available === true, "grid available is true", `available=${res.body.available}`);
+  check(
+    typeof res.body.cols === "number" && res.body.cols > 0 && typeof res.body.rows === "number" && res.body.rows > 0,
+    "grid has numeric cols and rows > 0",
+    `cols=${res.body.cols}, rows=${res.body.rows}`
+  );
+  check(
+    typeof res.body.origin === "object" && typeof res.body.origin.lat === "number" && typeof res.body.origin.lon === "number",
+    "grid has numeric origin.lat and origin.lon",
+    `origin=${JSON.stringify(res.body.origin)}`
+  );
+  check(
+    typeof res.body.step === "number" && res.body.step > 0,
+    "grid has numeric step > 0",
+    `step=${res.body.step}`
+  );
+}
+
+// 15. Decoded scores length matches cols * rows
+{
+  const res = await suggestGrid({ profile: "walk", w: "groceries:3,school:2" });
+  if (res.status === 200 && res.body.scores) {
+    const decoded = Buffer.from(res.body.scores, "base64");
+    const expected = res.body.cols * res.body.rows;
+    check(
+      decoded.length === expected,
+      "decoded scores length is exactly cols * rows",
+      `${decoded.length} bytes vs expected ${expected}`
+    );
+  }
+}
+
+// 16. Scores contain both 0 (no-data) and 255 (best) values
+{
+  const res = await suggestGrid({ profile: "walk", w: "groceries:3,school:2" });
+  if (res.status === 200 && res.body.scores) {
+    const decoded = Buffer.from(res.body.scores, "base64");
+    const hasZero = decoded.some((b) => b === 0);
+    const has255 = decoded.some((b) => b === 255);
+    check(hasZero, "scores contain at least one 0 (no-data)", hasZero ? "✓" : "all nonzero");
+    check(has255, "scores contain at least one 255 (best)", has255 ? "✓" : "max < 255");
+  }
+}
+
+// 17. Top suggestion from /api/suggest agrees with the grid heatmap
+//     The top cell should have a high score in the grid (>= 230, top decile)
+{
+  const res = await suggestGrid({ profile: "walk", w: "groceries:3,school:2" });
+  const suggestRes = await suggest({ profile: "walk", w: "groceries:3,school:2" });
+
+  if (res.status === 200 && suggestRes.status === 200 && res.body.scores) {
+    const decoded = Buffer.from(res.body.scores, "base64");
+    const topCell = suggestRes.body.cells?.[0];
+
+    if (topCell) {
+      // Compute grid indices from cell lat/lon
+      // Row: origin.lat - r*step = cell.lat => r = (origin.lat - cell.lat) / step
+      // Col: origin.lon + c*step = cell.lon => c = (cell.lon - origin.lon) / step
+      const r = Math.round((res.body.origin.lat - topCell.lat) / res.body.step);
+      const c = Math.round((topCell.lon - res.body.origin.lon) / res.body.step);
+
+      if (r >= 0 && r < res.body.rows && c >= 0 && c < res.body.cols) {
+        const score = decoded[r * res.body.cols + c];
+        const threshold = 230;
+        check(
+          score >= threshold,
+          `top suggestion is in grid top decile (score >= ${threshold})`,
+          `grid score at (${r},${c}) = ${score}, suggest score = ${topCell.score.toFixed(4)}`
+        );
+      } else {
+        check(false, "top suggestion in grid bounds", `out of bounds: (${r},${c}) not in [0,${res.body.rows})x[0,${res.body.cols})`);
+      }
+    }
+  }
+}
+
+// 18. Invalid inputs to /api/suggest-grid are rejected with matching errors to /api/suggest
+//     This ensures validation was not duplicated and cannot drift between endpoints
+{
+  // Unknown layer
+  const gridBadLayer = await suggestGrid({ profile: "walk", w: "nosuchlayer:3" });
+  const suggestBadLayer = await suggest({ profile: "walk", w: "nosuchlayer:3" });
+  check(
+    gridBadLayer.status === 400 && suggestBadLayer.status === 400 &&
+    gridBadLayer.body.error === suggestBadLayer.body.error,
+    "unknown layer: grid and suggest return same 400 error",
+    gridBadLayer.status === 400 ? "✓" : `grid=${gridBadLayer.status}, suggest=${suggestBadLayer.status}`
+  );
+
+  // Out-of-range weight (9 > max 3)
+  const gridBadWeight = await suggestGrid({ profile: "walk", w: "groceries:9" });
+  const suggestBadWeight = await suggest({ profile: "walk", w: "groceries:9" });
+  check(
+    gridBadWeight.status === 400 && suggestBadWeight.status === 400 &&
+    gridBadWeight.body.error === suggestBadWeight.body.error,
+    "out-of-range weight: grid and suggest return same 400 error",
+    gridBadWeight.status === 400 ? "✓" : `grid=${gridBadWeight.status}, suggest=${suggestBadWeight.status}`
+  );
+
+  // Malformed token (no colon)
+  const gridMalformed = await suggestGrid({ profile: "walk", w: "groceries" });
+  const suggestMalformed = await suggest({ profile: "walk", w: "groceries" });
+  check(
+    gridMalformed.status === 400 && suggestMalformed.status === 400 &&
+    gridMalformed.body.error === suggestMalformed.body.error,
+    "malformed weight token: grid and suggest return same 400 error",
+    gridMalformed.status === 400 ? "✓" : `grid=${gridMalformed.status}, suggest=${suggestMalformed.status}`
+  );
+
+  // All-zero weights
+  const gridAllZero = await suggestGrid({ profile: "walk", w: "groceries:0,school:0" });
+  const suggestAllZero = await suggest({ profile: "walk", w: "groceries:0,school:0" });
+  check(
+    gridAllZero.status === 400 && suggestAllZero.status === 400 &&
+    gridAllZero.body.error === suggestAllZero.body.error,
+    "all-zero weights: grid and suggest return same 400 error",
+    gridAllZero.status === 400 ? "✓" : `grid=${gridAllZero.status}, suggest=${suggestAllZero.status}`
+  );
+}
+
+// 19. stroller profile returns 400 on suggest-grid (no reach field)
+{
+  const res = await suggestGrid({ profile: "stroller", w: "groceries:2" });
+  check(
+    res.status === 400,
+    "profile=stroller returns 400 on suggest-grid",
+    `HTTP ${res.status}`
+  );
+}
+
+const TOTAL = 15 + 5 + 1 + 2 + 1 + 4 + 1;
 console.log(`\n${TOTAL - failed}/${TOTAL}`);
 process.exit(failed ? 1 : 0);
