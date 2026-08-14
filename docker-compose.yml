@@ -55,11 +55,13 @@ services:
     restart: unless-stopped
     environment:
       SITE_ADDRESS: ${SITE_ADDRESS:-:80}
-      # eudr-forest-check fronts through this Caddy (its own stack joins
-      # isochrone_default). Default is an unpublished port = effectively off.
-      EUDR_ADDRESS: ${EUDR_ADDRESS:-:8080}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Sibling services (eudr, cbam) drop their own site block in here from
+      # their own repos; on the server CADDY_SITES_DIR=/opt/caddy-sites, which
+      # this stack's rsync --delete deploy never touches. Local dev uses the
+      # tracked empty ./caddy-sites, so the import just matches nothing.
+      - ${CADDY_SITES_DIR:-./caddy-sites}:/etc/caddy/sites:ro
       - caddydata:/data
       - caddyconfig:/config
     ports:
