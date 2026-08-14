@@ -574,21 +574,29 @@ const resolveSchema = async (lat: number, lon: number) => {
     `WITH pick AS (
        SELECT id, schema_name, pois_at FROM public.areas
         WHERE status = 'ready'
+          -- bbox first because it is the indexed test and it bounds the set the
+          -- mask test below has to walk; the mask is what actually decides.
           AND ST_Contains(bbox, ST_SetSRID(ST_MakePoint($1, $2), 4326))
-        -- Smallest-bbox-wins ties when two imports overlap and are the same
-        -- size: measured on prod, area_27 and area_33 both bbox to 24.98 km²
-        -- and both contain 40.8634,29.3493, so ST_Area alone flipped a coin
-        -- and landed on area_27, whose nearest routable vertex to that point
-        -- is 1715m — refused — while area_33's is 198m and its mask actually
-        -- covers the point. Preferring the area whose coverage contains the
-        -- point first means the resolver agrees with the veil, which is built
-        -- from this exact COALESCE(coverage, bbox) expression (see /api/coverage).
-        -- Safe under DESC only because public.areas.bbox is NOT NULL: that
-        -- keeps COALESCE(coverage, bbox) always a real geometry, so ST_Contains
-        -- here is never NULL — a NULL would sort ahead of true under DESC and
-        -- pick the wrong area.
-        ORDER BY ST_Contains(COALESCE(coverage, bbox), ST_SetSRID(ST_MakePoint($1, $2), 4326)) DESC,
-                 ST_Area(bbox) ASC
+          -- The veil is drawn from this exact COALESCE(coverage, bbox)
+          -- expression (see /api/coverage), so anything weaker here makes the
+          -- resolver and the map disagree about the same point. T-020 had this
+          -- as an ORDER BY term — prefer the area whose mask contains the point,
+          -- fall back to smallest bbox — which settled ties between overlapping
+          -- imports but left the candidate set on the raw rectangle. Measured on
+          -- prod: berlin's bbox is 1,841 km² against a 979 km² mask, so a click
+          -- at Altlandsberg (52.5667,13.7333) fell outside every mask — dimmed,
+          -- correctly — while berlin's rectangle still matched it, and matched
+          -- means the handler says "no street nearby, 5,649m" instead of
+          -- "outside coverage". The UI offers an import only for the latter, so
+          -- 1,185 km² of the 3,045 km² of ready bboxes was dimmed AND
+          -- unimportable — the veil's own promise inverted.
+          AND ST_Contains(COALESCE(coverage, bbox), ST_SetSRID(ST_MakePoint($1, $2), 4326))
+        -- Smallest bbox wins whatever ties remain. area_27 and area_33 on prod
+        -- both bbox to 24.98 km² and both contain 40.8634,29.3493, but only
+        -- area_33's mask does (198m to a routable vertex against area_27's
+        -- 1715m) — the filter above now settles that before ordering runs, which
+        -- leaves ST_Area to separate areas that genuinely both cover a point.
+        ORDER BY ST_Area(bbox) ASC
         LIMIT 1
      ), touch AS (
        UPDATE public.areas SET last_used_at = now()
@@ -939,6 +947,40 @@ const refundImport = (areaId: number) => {
   console.log(`↩︎ refunded import slot for a failed area`);
 };
 
+// One expression for "this box is already served", shared by the rate limiter's
+// skip and by the handler below so the two cannot answer it differently.
+//
+// The mask test is on the box's CENTRE, not the box. A mask never contains its
+// own requested envelope — measured on the Ketzin box check-areas.mjs asks for,
+// whose area covers 73.8% of it, the rest being fields and water with no ways to
+// dissolve. Testing containment of the whole envelope therefore made every area
+// fail to dedup against the box it was imported from, and the same request
+// re-imported forever (caught locally: four identical Ketzin schemas).
+// ST_Intersects would fix that case and not the general one — a click 1km
+// outside a mask still overlaps a 5km box, so it would report "already covered"
+// to someone standing on ground nothing routes.
+//
+// The centre is the click: the UI builds the offered box around the point that
+// was refused, so asking whether the mask contains the centre asks exactly what
+// the resolver asked before offering the import (see resolveSchema). That keeps
+// the veil, the resolver and the dedup on one predicate. It does widen the
+// surface slightly — a box centred on a hole inside otherwise-covered ground now
+// imports — which 3/hour/IP, MAX_IMPORT_MB and LRU eviction already bound.
+//
+// It cuts the other way for a caller that does NOT centre its box on the point
+// it cares about: a centre in a covered pocket reuses even where the box's edges
+// reach unrouted ground. Every caller today does centre it (the UI's
+// IMPORT_HALF_M box around the click, check-areas.mjs around LAT/LON; the MCP
+// server never posts here), and the old bbox-only test was blind across the
+// whole rectangle rather than just near the centre, so this is narrower than
+// what it replaces — but a new non-UI caller would need this line reread.
+const COVERING_AREA_SQL = `SELECT id, schema_name FROM public.areas
+          WHERE status = 'ready'
+            AND ST_Contains(bbox, ST_MakeEnvelope($1, $2, $3, $4, 4326))
+            AND ST_Contains(COALESCE(coverage, bbox),
+                            ST_Centroid(ST_MakeEnvelope($1, $2, $3, $4, 4326)))
+          LIMIT 1`;
+
 const importLimiter = rateLimit({
   windowMs: 60 * 60_000,
   limit: IMPORT_LIMIT,
@@ -958,13 +1000,7 @@ const importLimiter = rateLimit({
     if (!box.ok || box.s === undefined) return true;
     try {
       const { s, w, n, e } = box;
-      const r = await pool.query(
-        `SELECT id, schema_name FROM public.areas
-          WHERE status = 'ready'
-            AND ST_Contains(bbox, ST_MakeEnvelope($1, $2, $3, $4, 4326))
-          LIMIT 1`,
-        [w, s, e, n]
-      );
+      const r = await pool.query(COVERING_AREA_SQL, [w, s, e, n]);
       if (r.rows[0]) {
         req.existingArea = r.rows[0];
         return true;
@@ -1009,13 +1045,7 @@ app.post("/api/areas", importLimiter, async (req: any, res: any) => {
   // request; reuse its answer rather than asking twice.
   const existing = req.existingArea
     ? { rows: [req.existingArea] }
-    : await pool.query(
-        `SELECT id, schema_name FROM public.areas
-          WHERE status = 'ready'
-            AND ST_Contains(bbox, ST_MakeEnvelope($1, $2, $3, $4, 4326))
-          LIMIT 1`,
-        [w, s, e, n]
-      );
+    : await pool.query(COVERING_AREA_SQL, [w, s, e, n]);
   if (existing.rows[0]) {
     // id included so the client can claim it locally even when it was
     // somebody else's import that already covered this spot.
