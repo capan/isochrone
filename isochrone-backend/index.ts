@@ -1327,6 +1327,33 @@ const runImport = async (areaId: number) => {
       throw new Error("import produced no routable vertices");
     }
 
+    // Routable somewhere is not routable *here*. The graph is fetched for the
+    // buffered imported_bbox (2.1km wider on each side), so an area whose only
+    // streets sit in that ring passes both counts above and still answers no
+    // click inside the box that was asked for — measured on area_13: 296
+    // vertices, 70 in the main component, dissolved footprint disjoint from its
+    // own registered bbox. T-020 made that area honest (the dissolve clips to
+    // bbox, comes back empty, and an EMPTY mask adds nothing to the veil) but
+    // it still went 'ready', and ready is not free: POST /api/areas dedups
+    // against ready areas whose bbox contains the request, so the broken area
+    // permanently blocks the one recovery available — re-importing that ground.
+    // It also holds MAX_IMPORT_MB budget and lists itself as a place that works.
+    //
+    // Deliberately the same computeCoverage the veil uses, and deliberately
+    // computed a second time (storeCoverage repeats it after the flip): one
+    // dissolve is ~250ms against an import measured in seconds to minutes, and
+    // paying it buys the importer and the map answering "does this cover the
+    // box" with one expression rather than two that can drift — the T-020
+    // lesson. A dissolve that *throws* must still not fail a good import
+    // (see the note above storeCoverage), so only a successful EMPTY rejects.
+    const boxMask = await computeCoverage(areaId, schemaName).catch((err) => {
+      console.error(`⚠️ coverage probe for ${schemaName} failed:`, (err as Error).message);
+      return null;
+    });
+    if (boxMask?.includes("EMPTY")) {
+      throw new Error("imported graph covers none of the requested area");
+    }
+
     // The one moment per area to do this: the requested bbox (where the person
     // actually clicked, not the buffered imported_bbox) is still in scope, and
     // doing this on read instead would put Nominatim on the /api/areas polling
