@@ -43,6 +43,41 @@ const RAMP = [
   "#0d366b",
 ];
 
+// Suggestion heatmap ramp (T-021): five stops, red→amber→green, interpolated
+// to a smooth 255-step lookup table once at load rather than per pixel — a
+// city-sized grid is up to ~42,000 cells and redoing the hex math per pixel
+// per redraw would be wasted work. Lightness rises with score (not a plain
+// hue sweep) so the ramp still separates worst from best under red-green
+// colour blindness or in greyscale. One ramp for every basemap, unlike
+// BASEMAPS[].ramp above — that one forks per theme because its far end has
+// to stay visible against a dark tile; this ramp sits on an opaque canvas
+// and doesn't have that problem.
+const HEAT_STOPS: [number, string][] = [
+  [0, "#8c1d1d"],
+  [0.25, "#d94f04"],
+  [0.5, "#f0a202"],
+  [0.75, "#a6c34d"],
+  [1, "#e8f5a3"],
+];
+const hexToRgb = (hex: string): [number, number, number] => [
+  parseInt(hex.slice(1, 3), 16),
+  parseInt(hex.slice(3, 5), 16),
+  parseInt(hex.slice(5, 7), 16),
+];
+// HEAT_LUT[v - 1] is the colour for score byte v (1..255); byte 0 means "no
+// data" and is handled separately (fully transparent) without a lookup.
+const HEAT_LUT: [number, number, number][] = Array.from({ length: 255 }, (_, i) => {
+  const t = i / 254;
+  let hi = HEAT_STOPS.findIndex(([stop]) => t <= stop);
+  if (hi <= 0) hi = 1; // t=0 still interpolates within the first segment
+  const [t0, c0] = HEAT_STOPS[hi - 1];
+  const [t1, c1] = HEAT_STOPS[hi];
+  const f = (t - t0) / (t1 - t0 || 1);
+  const [r0, g0, b0] = hexToRgb(c0);
+  const [r1, g1, b1] = hexToRgb(c1);
+  return [r0 + (r1 - r0) * f, g0 + (g1 - g0) * f, b0 + (b1 - b0) * f];
+});
+
 // Deep-link support: /?lat=52.52&lon=13.405&profile=wheelchair loads with
 // that isochrone drawn — the MCP server's "view on map" links point here.
 const urlParams = new URLSearchParams(window.location.search);
@@ -206,6 +241,17 @@ type SuggestCell = {
   // How many places of each layer sit within the profile's density radius. Absent
   // on a field whose density has not been backfilled, so every read is optional.
   nearby?: Partial<Record<ReachLayer, number>>;
+};
+
+// /api/suggest-grid: a whole-city percentile heatmap, not per-cell reach
+// numbers — see MapView's drawHeat for the byte layout this decodes.
+type SuggestGrid = {
+  available: boolean;
+  origin?: { lat: number; lon: number };
+  step?: number;
+  cols?: number;
+  rows?: number;
+  scores?: string; // base64
 };
 
 // Sub-minute reach is the normal case in inner Berlin, not an edge case, and
@@ -462,6 +508,12 @@ export default function MapView() {
   const drawSuggestRef = useRef<(cells: SuggestCell[]) => void>(() => {});
   const focusSuggestionRef = useRef<(c: SuggestCell) => void>(() => {});
   const suggestAbortRef = useRef<AbortController | null>(null);
+  // The city heatmap, fetched alongside /api/suggest but on its own request —
+  // its own imageOverlay ref and abort controller so a slow grid can never
+  // block or race the ten markers above.
+  const heatLayerRef = useRef<L.ImageOverlay | null>(null);
+  const drawHeatRef = useRef<(grid: SuggestGrid) => void>(() => {});
+  const suggestGridAbortRef = useRef<AbortController | null>(null);
   const [copied, setCopied] = useState(false);
   const [helpFocus, setHelpFocus] = useState<"assistant" | undefined>(undefined);
   // Only a deep link carries lat+lon, and only the MCP server hands those out,
@@ -514,6 +566,9 @@ export default function MapView() {
     "idle" | "loading" | "ok" | "empty" | "unavailable" | "error"
   >("idle");
   const [suggestReason, setSuggestReason] = useState("");
+  // Drives the heatmap legend only — the layer itself lives imperatively on
+  // heatLayerRef, same split as isochroneRef/shownMinutes above.
+  const [heatAvailable, setHeatAvailable] = useState(false);
 
   const closeHelp = () => {
     setHelp(false);
@@ -599,7 +654,87 @@ export default function MapView() {
     });
     new HelpControl({ position: "topleft" }).addTo(map);
 
+    // Dedicated pane for the heatmap, created once here rather than per
+    // draw. zIndex 350 sits strictly between tilePane (200, the basemap) and
+    // the default overlayPane (400, where the veil, the isochrone bands and
+    // every marker live) — Leaflet's own documented z-index stacking then
+    // keeps the heatmap under all of those, rather than betting on insertion
+    // order into a renderer Leaflet owns.
+    map.createPane("heat");
+    map.getPane("heat")!.style.zIndex = "350";
+
     areasRef.current = L.layerGroup().addTo(map);
+
+    // Suggestion heatmap: one <img>, not up to ~42,000 Leaflet shapes. A
+    // canvas exactly cols×rows — one real pixel per grid cell — lets the
+    // browser do the upscaling; image-rendering:pixelated (see .heat-overlay
+    // in index.css) keeps that scaling blocky rather than inventing gradient
+    // between measurements that were never taken (each cell is a real
+    // ~163m×267m on the ground). Always removes the previous layer first, so
+    // re-answering the questionnaire replaces it instead of stacking a
+    // second one, and `available: false` leaves nothing behind.
+    const drawHeat = (grid: SuggestGrid) => {
+      if (heatLayerRef.current) {
+        map.removeLayer(heatLayerRef.current);
+        heatLayerRef.current = null;
+      }
+      const { available, origin, step, cols, rows, scores } = grid;
+      if (!available || !origin || !step || !cols || !rows || !scores) {
+        setHeatAvailable(false);
+        return;
+      }
+      let bytes: Uint8Array;
+      try {
+        bytes = Uint8Array.from(atob(scores), (c) => c.charCodeAt(0));
+      } catch {
+        setHeatAvailable(false); // malformed base64: draw nothing, not garbage
+        return;
+      }
+      if (bytes.length !== cols * rows) {
+        setHeatAvailable(false);
+        return;
+      }
+
+      const canvas = document.createElement("canvas");
+      canvas.width = cols;
+      canvas.height = rows;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        setHeatAvailable(false);
+        return;
+      }
+      const img = ctx.createImageData(cols, rows);
+      // Row 0 = northmost, col 0 = westmost, index r*cols+c — maps straight
+      // onto canvas pixel (c, r) with no flip (see the wire contract).
+      for (let i = 0; i < bytes.length; i++) {
+        const v = bytes[i];
+        const p = i * 4;
+        if (v === 0) {
+          img.data[p + 3] = 0; // no data: fully transparent
+          continue;
+        }
+        const [r, g, b] = HEAT_LUT[v - 1];
+        img.data[p] = r;
+        img.data[p + 1] = g;
+        img.data[p + 2] = b;
+        img.data[p + 3] = 255;
+      }
+      ctx.putImageData(img, 0, 0);
+
+      const bounds: L.LatLngBoundsExpression = [
+        [origin.lat - rows * step, origin.lon],
+        [origin.lat, origin.lon + cols * step],
+      ];
+      heatLayerRef.current = L.imageOverlay(canvas.toDataURL(), bounds, {
+        opacity: 0.6, // tuned so the basemap still reads through
+        interactive: false,
+        className: "heat-overlay",
+        pane: "heat", // stacking below the veil/markers comes from this, not add order
+      }).addTo(map);
+      setHeatAvailable(true);
+    };
+    drawHeatRef.current = drawHeat;
+
     // Canvas, not SVG: a 25-minute walk in central Berlin is ~2,100 places,
     // and that many individual SVG nodes makes panning crawl.
     const placeRenderer = L.canvas({ padding: 0.3 });
@@ -1284,6 +1419,26 @@ export default function MapView() {
           setSuggestState("error");
           drawSuggestRef.current([]);
         });
+
+      // Whole-city heatmap, fetched in parallel with the markers above — a
+      // second fetch() call, not awaited between them, so a slow grid can
+      // never delay the ten pins. Same abort-on-superseded guard as the
+      // fetch above, its own AbortController: aborting the in-flight request
+      // when a newer answer set arrives is what stops a stale response from
+      // painting over a fresh one, the same out-of-order race drawGenRef
+      // guards elsewhere in this file for isochrone clicks.
+      suggestGridAbortRef.current?.abort();
+      const gridAc = new AbortController();
+      suggestGridAbortRef.current = gridAc;
+      fetch(`/api/suggest-grid?profile=${suggestProfile}&w=${encodeURIComponent(w)}`, {
+        signal: gridAc.signal,
+      })
+        .then((r) => (r.ok ? r.json() : { available: false }))
+        .then((d: SuggestGrid) => drawHeatRef.current(d))
+        .catch((err) => {
+          if (err?.name === "AbortError") return; // superseded by a newer answer
+          drawHeatRef.current({ available: false }); // network blip: no heatmap, not a stale one
+        });
     }, 400);
     return () => clearTimeout(t);
   }, [suggestAnswers, suggestProfile]);
@@ -1427,6 +1582,23 @@ export default function MapView() {
               <span>{shownMinutes} min</span>
             </div>
           </div>
+
+          {heatAvailable && (
+            <div className="ramp heat-ramp">
+              <div className="ramp-bar">
+                {HEAT_STOPS.map(([, c]) => (
+                  <i key={c} style={{ background: c }} />
+                ))}
+              </div>
+              {/* Percentile rank always spreads the full ramp, even when the
+                  real spread between the best and worst cell is tiny — same
+                  honesty fix as the "alternatives, not a ranking" line
+                  above. An absolute reading of these colours would be a lie. */}
+              <p className="muted heat-legend-note">
+                worse ← compared with the rest of Berlin → better
+              </p>
+            </div>
+          )}
 
           {!lastClickRef.current && (
             <p className="hint">

@@ -17,6 +17,7 @@ import {
   REACH_SPREAD_DEGREES,
   REACH_SPREAD_METERS,
   REACH_MAX_WEIGHT,
+  SUGGEST_GRID_STEP_DEGREES,
   DENSITY_PLENTY,
   DENSITY_FLOOR,
   nearbyUpdateSql,
@@ -1684,6 +1685,14 @@ const normalizeWeights = (weights: Record<string, number>): [string, number][] =
 const suggestCacheKey = (profile: string, entries: [string, number][]) =>
   `suggest4:${profile}:${entries.map(([l, w]) => `${l}:${w}`).join(",")}`;
 
+// Own prefix (T-021), not suggest4's: the two endpoints cache different
+// shapes (ten named cells vs. a percentile byte grid) computed by different
+// queries, so a shared prefix would let one's warm/invalidate assumptions
+// leak onto the other. Bump this the same way suggest4 above got bumped —
+// whenever the aggregation query below changes shape.
+const suggestGridCacheKey = (profile: string, entries: [string, number][]) =>
+  `suggestgrid1:${profile}:${entries.map(([l, w]) => `${l}:${w}`).join(",")}`;
+
 // ST_SnapToGrid guarantees at most one candidate per coarse cell but nothing
 // about the gap BETWEEN cells — two candidates straddling a grid boundary can
 // land a few metres apart. Measured against a real reach field: 139m between
@@ -1704,6 +1713,63 @@ const haversineM = (aLat: number, aLon: number, bLat: number, bLon: number) => {
     Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLon / 2) ** 2;
   return 2 * 6371000 * Math.asin(Math.sqrt(s)); // 6,371,000m = mean Earth radius
 };
+
+// The per-cell score, as a WITH-clause fragment (no leading "WITH", no
+// trailing comma) rather than a function that builds the string: this way
+// /api/suggest and /api/suggest-grid (T-021) interpolate the exact same
+// characters into two different queries, instead of two hand-copies of a
+// formula that T-012 already proved will drift. It is deliberately not a
+// stored CTE materialized once and reused by both endpoints — they run in
+// separate pool.query calls with their own downstream CTEs (spread vs. grid),
+// so sharing the text is the only sharing possible.
+//
+// $1/$2 = weights.layer/w, $3 = decaySeconds, $4 = totalWeight, $5 = profile,
+// $6/$7 = plenty.layer/p, $8 = DENSITY_FLOOR — a contiguous $1..$8, on
+// purpose: the fragment owns that whole range and every caller-specific bind
+// var (REACH_SPREAD_DEGREES in scoreSuggestions; originLon/originLat/step in
+// scoreSuggestGrid) is appended strictly AFTER it, starting at $9. No number
+// is ever reserved-but-unused for a caller to remember to skip, so adding a
+// ninth param here can only ever push callers' numbers up, never make one
+// caller's $N silently mean a different bind value in the other query.
+const SCORED_CTE_SQL = `
+     weights(layer, w) AS (
+       SELECT unnest($1::text[]), unnest($2::int[])
+     ),
+     -- T-019: reachability gates, density ranks. reach is the old term; the
+     -- density factor is DENSITY_FLOOR plus the rest earned by how many places
+     -- of that layer are nearby, log-scaled against the layer's own "plenty"
+     -- (DENSITY_PLENTY, the measured p90 — dining's 185 is 17x school's 11, so a
+     -- shared scale would make every score a dining score).
+     --
+     -- COALESCE(nearby, plenty) so a field whose density has not been backfilled
+     -- yet scores exactly as it did before this change, rather than collapsing to
+     -- the floor. log-scaled because the difference between 1 and 10 restaurants
+     -- matters and the difference between 300 and 310 does not.
+     plenty(layer, p) AS (
+       SELECT unnest($6::text[]), unnest($7::int[])
+     ),
+     scored AS (
+       SELECT r.cell_id,
+              -- float8 throughout, not numeric. Postgres's numeric ln() is
+              -- arbitrary-precision and measured 30x slower than the float8 one
+              -- (2.12s vs 0.07s over 500k rows), which alone took a cold scoring
+              -- query from ~1.0s to ~3.5s and would have tripled the startup warm
+              -- pass. Nothing here needs exact decimal arithmetic — the result is
+              -- rounded to 4 places and used to sort.
+              (SUM(
+                 wt.w
+                 * GREATEST(0, 1 - r.seconds::float8 / $3::float8)
+                 * ($8::float8 + (1 - $8::float8) * LEAST(1::float8,
+                     ln(1 + COALESCE(r.nearby, pl.p)::float8) / ln(1 + pl.p::float8)))
+               ) / $4)::double precision AS score,
+              jsonb_object_agg(r.layer, r.seconds) AS layers,
+              jsonb_object_agg(r.layer, COALESCE(r.nearby, 0)) AS nearby
+         FROM ${DEFAULT_SCHEMA}.reach r
+         JOIN weights wt ON wt.layer = r.layer
+         JOIN plenty pl ON pl.layer = r.layer
+        WHERE r.profile = $5
+        GROUP BY r.cell_id
+     )`;
 
 // Runs the scored aggregate and caches it. Shared by the live endpoint below
 // and the warm pass near the bottom of this file, so the two can never
@@ -1748,44 +1814,7 @@ const scoreSuggestions = async (profile: string, entries: [string, number][]) =>
   // bind parameter computed once in JS rather than recomputed per cell.
   const decaySeconds = REACH_DECAY_SECONDS[profile as ReachProfile];
   const r = await pool.query(
-    `WITH weights(layer, w) AS (
-       SELECT unnest($1::text[]), unnest($2::int[])
-     ),
-     -- T-019: reachability gates, density ranks. reach is the old term; the
-     -- density factor is DENSITY_FLOOR plus the rest earned by how many places
-     -- of that layer are nearby, log-scaled against the layer's own "plenty"
-     -- (DENSITY_PLENTY, the measured p90 — dining's 185 is 17x school's 11, so a
-     -- shared scale would make every score a dining score).
-     --
-     -- COALESCE(nearby, plenty) so a field whose density has not been backfilled
-     -- yet scores exactly as it did before this change, rather than collapsing to
-     -- the floor. log-scaled because the difference between 1 and 10 restaurants
-     -- matters and the difference between 300 and 310 does not.
-     plenty(layer, p) AS (
-       SELECT unnest($7::text[]), unnest($8::int[])
-     ),
-     scored AS (
-       SELECT r.cell_id,
-              -- float8 throughout, not numeric. Postgres's numeric ln() is
-              -- arbitrary-precision and measured 30x slower than the float8 one
-              -- (2.12s vs 0.07s over 500k rows), which alone took a cold scoring
-              -- query from ~1.0s to ~3.5s and would have tripled the startup warm
-              -- pass. Nothing here needs exact decimal arithmetic — the result is
-              -- rounded to 4 places and used to sort.
-              (SUM(
-                 wt.w
-                 * GREATEST(0, 1 - r.seconds::float8 / $3::float8)
-                 * ($9::float8 + (1 - $9::float8) * LEAST(1::float8,
-                     ln(1 + COALESCE(r.nearby, pl.p)::float8) / ln(1 + pl.p::float8)))
-               ) / $4)::double precision AS score,
-              jsonb_object_agg(r.layer, r.seconds) AS layers,
-              jsonb_object_agg(r.layer, COALESCE(r.nearby, 0)) AS nearby
-         FROM ${DEFAULT_SCHEMA}.reach r
-         JOIN weights wt ON wt.layer = r.layer
-         JOIN plenty pl ON pl.layer = r.layer
-        WHERE r.profile = $5
-        GROUP BY r.cell_id
-     ),
+    `WITH ${SCORED_CTE_SQL},
      -- Best-scoring cell per ~700m coarse cell (REACH_SPREAD_DEGREES) — a
      -- cheap pre-filter only. It bounds candidates per grid cell, not the gap
      -- between cells, so the real 700m spread is enforced afterwards in JS
@@ -1793,7 +1822,7 @@ const scoreSuggestions = async (profile: string, entries: [string, number][]) =>
      -- 10 so that greedy thinning still has enough candidates left to pick
      -- 10 mutually-distant ones from.
      spread AS (
-       SELECT DISTINCT ON (ST_SnapToGrid(c.geom, $6))
+       SELECT DISTINCT ON (ST_SnapToGrid(c.geom, $9))
               c.id AS cell_id, c.geom, s.score, s.layers, s.nearby
          FROM scored s
          JOIN ${DEFAULT_SCHEMA}.reach_cells c ON c.id = s.cell_id
@@ -1816,7 +1845,7 @@ const scoreSuggestions = async (profile: string, entries: [string, number][]) =>
         -- md5 of the cell id is stable across restarts and cache warms, which
         -- is all the coordinate sort was actually buying, and it samples the
         -- tied set uniformly instead of sorting it geographically.
-        ORDER BY ST_SnapToGrid(c.geom, $6), s.score DESC, md5(c.id::text)
+        ORDER BY ST_SnapToGrid(c.geom, $9), s.score DESC, md5(c.id::text)
      )
      SELECT ROUND(ST_Y(geom)::numeric, 6)::double precision AS lat,
             ROUND(ST_X(geom)::numeric, 6)::double precision AS lon,
@@ -1832,10 +1861,10 @@ const scoreSuggestions = async (profile: string, entries: [string, number][]) =>
       decaySeconds,
       totalWeight,
       profile,
-      REACH_SPREAD_DEGREES,
       layers,
       layers.map((l) => DENSITY_PLENTY[l as keyof typeof REACH_LAYERS]),
       DENSITY_FLOOR,
+      REACH_SPREAD_DEGREES,
     ]
   );
 
@@ -1880,6 +1909,141 @@ const scoreSuggestions = async (profile: string, entries: [string, number][]) =>
   // where an expiry is doing real work.
   await cacheSet(
     suggestCacheKey(profile, entries),
+    JSON.stringify(body),
+    60 * 60 * 24 * 7
+  );
+  return body;
+};
+
+// --- suggestion heatmap (T-021) ----------------------------------------------
+//
+// /api/suggest keeps ten named winners; this keeps every coarse cell so the UI
+// can paint the whole reach field instead of ten pins. Same `scored` CTE
+// (SCORED_CTE_SQL above) as /api/suggest — a second copy of the formula is
+// exactly the T-012 mistake this file already paid for once.
+const scoreSuggestGrid = async (profile: string, entries: [string, number][]) => {
+  const layers = entries.map(([l]) => l);
+  const weights = entries.map(([, w]) => w);
+  const totalWeight = weights.reduce((a, b) => a + b, 0);
+
+  // Same "not ready yet" check as scoreSuggestions, and for the same reason:
+  // DEFAULT_SCHEMA.reach is empty before the precompute runs and absent on a
+  // fresh stack. Duplicated rather than shared because it is three lines and
+  // the two callers already share the thing that actually mattered (the
+  // formula, via SCORED_CTE_SQL) — sharing this too would be an abstraction
+  // for its own sake.
+  let hasRows = false;
+  try {
+    const has = await pool.query(
+      `SELECT EXISTS (SELECT 1 FROM ${DEFAULT_SCHEMA}.reach LIMIT 1) AS has_rows`
+    );
+    hasRows = has.rows[0].has_rows;
+  } catch (err) {
+    if ((err as any).code !== "42P01") throw err; // 42P01 = undefined_table
+  }
+  if (!hasRows) {
+    return {
+      available: false as const,
+      reason: "suggestions have not been computed yet",
+    };
+  }
+
+  const decaySeconds = REACH_DECAY_SECONDS[profile as ReachProfile];
+
+  // origin/cols/rows come from the reach field's own footprint (ST_Extent
+  // over reach_cells), never a hardcoded or an area's bbox — a bbox promises
+  // ground the graph does not have (see COVERAGE_GRID_DEGREES above, and
+  // T-018, for the last time that exact mistake shipped).
+  const ext = await pool.query(
+    `SELECT ST_YMax(ext) AS north, ST_XMin(ext) AS west,
+            ST_YMin(ext) AS south, ST_XMax(ext) AS east
+       FROM (SELECT ST_Extent(geom)::geometry AS ext
+               FROM ${DEFAULT_SCHEMA}.reach_cells) e`
+  );
+  const { north, west, south, east } = ext.rows[0];
+  const cols = Math.ceil((east - west) / SUGGEST_GRID_STEP_DEGREES);
+  const rows = Math.ceil((north - south) / SUGGEST_GRID_STEP_DEGREES);
+
+  const r = await pool.query(
+    `WITH ${SCORED_CTE_SQL},
+     -- Coarse cell each reach cell falls into, floored from the field's own
+     -- north-west corner — NOT ST_SnapToGrid's default (0,0) origin, and not
+     -- ST_SnapToGrid at all: its origin overload rounds to the NEAREST grid
+     -- node, while the wire contract defines cell (row, col) by its NW corner
+     -- (origin.lat - row*step, origin.lon + col*step), which is a floor, not a
+     -- round. floor() here is one function instead of snapping and then
+     -- converting back, and it cannot disagree with the response's own index
+     -- formula because it IS that formula.
+     grid AS (
+       SELECT floor((ST_X(c.geom) - $9::float8) / $11::float8)::int AS col,
+              floor(($10::float8 - ST_Y(c.geom)) / $11::float8)::int AS row,
+              s.score
+         FROM scored s
+         JOIN ${DEFAULT_SCHEMA}.reach_cells c ON c.id = s.cell_id
+     ),
+     -- One row per non-empty coarse cell. avg(score), not avg-of-ranks: rank
+     -- has to run on the number a heatmap cell actually displays, or a coarse
+     -- cell of nine mediocre-but-consistent reach cells could out-rank one
+     -- with a single spectacular cell and nine poor ones. Empty coarse cells
+     -- never reach this CTE at all (no reach cell landed in them), which is
+     -- what keeps them out of the percentile below.
+     aggregated AS (
+       SELECT col, row, avg(score) AS avg_score
+         FROM grid
+        GROUP BY col, row
+     )
+     -- percent_rank, not the raw score. Raw scores cluster in a narrow band
+     -- across the whole field (DENSITY_FLOOR keeps every reachable layer at
+     -- 0.5..1.0, see layers.ts), so a linear 0..1 -> 0..255 map would paint
+     -- almost every cell the same shade of the heatmap. Percentile rank
+     -- spreads whatever the real distribution is across the full byte range.
+     SELECT col, row, percent_rank() OVER (ORDER BY avg_score) AS pct
+       FROM aggregated`,
+    [
+      layers,
+      weights,
+      decaySeconds,
+      totalWeight,
+      profile,
+      layers,
+      layers.map((l) => DENSITY_PLENTY[l as keyof typeof REACH_LAYERS]),
+      DENSITY_FLOOR,
+      west,
+      north,
+      SUGGEST_GRID_STEP_DEGREES,
+    ]
+  );
+
+  // Byte 0 is reserved for "no reach cells landed here" (outside the graph's
+  // footprint, or a gap inside it) and must stay unambiguous, so a real cell
+  // is clamped to 1..255 even at the very bottom of the percentile — 0 would
+  // otherwise be indistinguishable from no data, and the UI would either grey
+  // out real low-scoring ground or paint holes in the graph as if they scored
+  // something.
+  const buf = Buffer.alloc(cols * rows, 0);
+  for (const cell of r.rows) {
+    // Guard, not expected: cols/rows are ceil()'d from the same extent the
+    // grid CTE floors against, so a cell can only land exactly on the far
+    // edge under floating-point rounding, never past it.
+    if (cell.row < 0 || cell.row >= rows || cell.col < 0 || cell.col >= cols) continue;
+    const byte = Math.max(1, Math.min(255, Math.round(1 + cell.pct * 254)));
+    buf[cell.row * cols + cell.col] = byte;
+  }
+
+  const body = {
+    available: true as const,
+    origin: { lat: north, lon: west },
+    step: SUGGEST_GRID_STEP_DEGREES,
+    cols,
+    rows,
+    scores: buf.toString("base64"),
+  };
+  // Same 7-day TTL and reasoning as suggestCacheKey above: the field only
+  // changes on reimport/reload, and this is not warmed at startup (unlike
+  // /api/suggest) — a cold compute on first request is the accepted cost of
+  // not growing the warm pass for a panel most sessions never open.
+  await cacheSet(
+    suggestGridCacheKey(profile, entries),
     JSON.stringify(body),
     60 * 60 * 24 * 7
   );
@@ -1977,29 +2141,48 @@ const withPlaceNames = async (body: any) => {
   return { ...body, cells };
 };
 
-app.get("/api/suggest", async (req: any, res: any) => {
-  const profile = String(req.query.profile ?? "walk");
+// Shared by /api/suggest and /api/suggest-grid (T-021) so the two cannot
+// accept, or reject, a different set of profiles/layers/weights. This is the
+// exact shape of mistake ADR-0021 was written about: a guard duplicated
+// across two routes drifts the moment one of them is edited and the other
+// is not. Returns a discriminated result rather than writing to `res`
+// itself, so it stays a pure function callers can test against and reuse for
+// any future route with the same query shape.
+const parseSuggestQuery = (
+  query: any
+):
+  | { ok: true; profile: string; entries: [string, number][] }
+  | { ok: false; status: number; body: { error: string } } => {
+  const profile = String(query.profile ?? "walk");
   // REACH_PROFILES, not all of PROFILES: stroller and bike have no
   // precomputed reach field (layers.ts explains why).
   if (!(REACH_PROFILES as readonly string[]).includes(profile)) {
-    return res
-      .status(400)
-      .json({ error: `Unknown profile. Try: ${REACH_PROFILES.join(", ")}` });
+    return {
+      ok: false,
+      status: 400,
+      body: { error: `Unknown profile. Try: ${REACH_PROFILES.join(", ")}` },
+    };
   }
 
   const rawWeights: Record<string, number> = {};
-  const raw = String(req.query.w ?? "").trim();
+  const raw = String(query.w ?? "").trim();
   for (const token of raw.split(",").map((t) => t.trim()).filter(Boolean)) {
     const [layer, wStr] = token.split(":");
     if (!layer || !Object.prototype.hasOwnProperty.call(REACH_LAYERS, layer)) {
-      return res.status(400).json({
-        error: `Unknown layer in "${token}". Try: ${Object.keys(REACH_LAYERS).join(", ")}`,
-      });
+      return {
+        ok: false,
+        status: 400,
+        body: {
+          error: `Unknown layer in "${token}". Try: ${Object.keys(REACH_LAYERS).join(", ")}`,
+        },
+      };
     }
     if (!wStr || !/^\d+$/.test(wStr) || parseInt(wStr, 10) > REACH_MAX_WEIGHT) {
-      return res.status(400).json({
-        error: `Weight in "${token}" must be an integer 0..${REACH_MAX_WEIGHT}`,
-      });
+      return {
+        ok: false,
+        status: 400,
+        body: { error: `Weight in "${token}" must be an integer 0..${REACH_MAX_WEIGHT}` },
+      };
     }
     // Last one wins on a repeated layer rather than double-joining it below
     // and silently doubling its weight.
@@ -2008,10 +2191,20 @@ app.get("/api/suggest", async (req: any, res: any) => {
 
   const entries = normalizeWeights(rawWeights);
   if (!entries.length) {
-    return res.status(400).json({
-      error: "Need at least one layer with a non-zero weight, e.g. w=groceries:3",
-    });
+    return {
+      ok: false,
+      status: 400,
+      body: { error: "Need at least one layer with a non-zero weight, e.g. w=groceries:3" },
+    };
   }
+
+  return { ok: true, profile, entries };
+};
+
+app.get("/api/suggest", async (req: any, res: any) => {
+  const parsed = parseSuggestQuery(req.query);
+  if (!parsed.ok) return res.status(parsed.status).json(parsed.body);
+  const { profile, entries } = parsed;
 
   // No `limit` param: it would multiply the 648-answer cache space by however
   // many values callers invent, for no user-visible gain. Fixed at 10 inside
@@ -2028,6 +2221,43 @@ app.get("/api/suggest", async (req: any, res: any) => {
     res.json(await withPlaceNames(await scoreSuggestions(profile, entries)));
   } catch (err) {
     console.error("❌ suggest error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/suggest-grid — the same scored field as /api/suggest, but every
+// coarse cell instead of the top ten, as a base64 byte grid the UI paints
+// directly rather than parsing 648 named pins. Same validation, same
+// available:false conditions, same cache TTL convention; only the
+// aggregation and the response shape differ. Registered after the global
+// rate limiter above (not pollLimiter), same as /api/suggest: this fires
+// once per questionnaire submission, not on a poll loop.
+//
+// Measured 2026-08-14, walk / groceries:3,school:2 against the full Berlin
+// field: 292 cols x 145 rows, a 42,340-byte grid, 18,695 of them non-zero
+// (the rest is outside the graph's footprint — the extent is a rectangle,
+// the routable city is not, same shape of gap COVERAGE_GRID_DEGREES exists
+// to draw around in layers.ts). 887ms cold (one aggregate over ~134,280
+// scored cells plus the percent_rank), 4-5ms warm from redis. Response body
+// (JSON, base64 included) 56.6KB — small enough that this is not worth a
+// binary content-type or a separate byte-range endpoint.
+app.get("/api/suggest-grid", async (req: any, res: any) => {
+  const parsed = parseSuggestQuery(req.query);
+  if (!parsed.ok) return res.status(parsed.status).json(parsed.body);
+  const { profile, entries } = parsed;
+
+  const key = suggestGridCacheKey(profile, entries);
+  const cached = await cacheGet(key);
+  if (cached) {
+    cacheHits++;
+    return res.json(JSON.parse(cached as string));
+  }
+  cacheMisses++;
+
+  try {
+    res.json(await scoreSuggestGrid(profile, entries));
+  } catch (err) {
+    console.error("❌ suggest-grid error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

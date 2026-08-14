@@ -66,6 +66,14 @@ export const REACH_DECAY_SECONDS: Record<ReachProfile, number> = {
 // resolution; two grids that nearly agree are worse than one that is coarse.
 export const REACH_CELL_DEGREES = 0.0006;
 
+// /api/suggest-grid's coarse heatmap cell — 4x REACH_CELL_DEGREES, derived
+// rather than a second literal, so it cannot silently stop being 4x the day
+// the reach grid's own resolution changes (the T-012 pattern this whole file
+// exists to avoid). ~163m x 267m at 52.5°N: longitude degrees are ~68% the
+// width of latitude degrees this far north (see haversineM in index.ts), so
+// the cell is not square even though it is 4 reach cells on a side either way.
+export const SUGGEST_GRID_STEP_DEGREES = REACH_CELL_DEGREES * 4;
+
 // Results are thinned so no two are closer than this, or the top ten are ten
 // adjacent cells on the same street.
 //
