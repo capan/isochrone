@@ -172,6 +172,217 @@ const saveMine = (ids: number[]) => {
   }
 };
 
+// --- "where should I live" questionnaire --------------------------------
+// Mirrors isochrone-backend/layers.ts REACH_LAYERS. Kept as a local literal
+// union rather than an import: nothing else in this file imports backend
+// modules, and the set only changes in lockstep with a backend release.
+type ReachLayer =
+  | "groceries"
+  | "health"
+  | "kindergarten"
+  | "school"
+  | "playground"
+  | "greenspace"
+  | "dining";
+
+const LAYER_LABEL: Record<ReachLayer, string> = {
+  groceries: "groceries",
+  health: "pharmacy/doctor",
+  kindergarten: "kindergarten",
+  school: "school",
+  playground: "playground",
+  greenspace: "green space",
+  dining: "dining",
+};
+
+type SuggestCell = {
+  lat: number;
+  lon: number;
+  score: number;
+  layers: Partial<Record<ReachLayer, number>>;
+  // null until the backend has reverse-geocoded it; results are useful without
+  // one, so this never blocks the response (see withPlaceNames in index.ts).
+  name?: string | null;
+  // How many places of each layer sit within the profile's density radius. Absent
+  // on a field whose density has not been backfilled, so every read is optional.
+  nearby?: Partial<Record<ReachLayer, number>>;
+};
+
+// Sub-minute reach is the normal case in inner Berlin, not an edge case, and
+// Math.round turned all of it into "0′" — a whole panel of zeroes reads as
+// broken data rather than as "it is right there".
+const reachLabel = (secs: number) =>
+  secs < 60 ? "<1′" : `${Math.round(secs / 60)}′`;
+
+// Ten results whose scores differ in the fourth decimal are not a ranking, and
+// printing "100% match" ten times says so in the least useful way. Measured on
+// the default answers: 1.0000, 1.0000, 1.0000, 1.0000, 0.9978 … 0.9942 — a
+// spread of 0.6%, all of which rounds to 100. So only claim a ranking when the
+// numbers support one.
+const SUGGEST_TIE_EPSILON = 0.02;
+const scoresAreTied = (cells: SuggestCell[]) =>
+  cells.length > 1 &&
+  cells[0].score - cells[cells.length - 1].score < SUGGEST_TIE_EPSILON;
+
+// Five questions set weights; the answers are typed as a closed union each,
+// which is what keeps the answer space closed — 4·3·2·3·3·3 = 648 sets once
+// T-017 added the dog household option and the cycling profile, up from T-016's
+// 324. That closure is what lets the backend warm every possible answer into
+// redis at startup; a free-text or numeric answer here would blow it open and
+// take the warm pass with it.
+type SuggestAnswers = {
+  household: "alone" | "kids_u6" | "kids_school" | "with_dog";
+  groceries: "often" | "weekly";
+  health: "important" | "nice" | "not";
+  green: "lot" | "some" | "not";
+  dining: "often" | "sometimes" | "rarely";
+};
+
+const DEFAULT_SUGGEST_ANSWERS: SuggestAnswers = {
+  household: "alone",
+  groceries: "weekly",
+  health: "nice",
+  green: "some",
+  dining: "sometimes",
+};
+
+type WeightQuestion = {
+  id: keyof SuggestAnswers;
+  kind: "weight";
+  label: string;
+  options: {
+    value: string;
+    label: string;
+    weights: Partial<Record<ReachLayer, number>>;
+  }[];
+};
+type MobilityQuestion = {
+  id: "mobility";
+  kind: "profile";
+  label: string;
+  options: { value: "walk" | "wheelchair" | "bike"; label: string }[];
+};
+type SuggestQuestion = WeightQuestion | MobilityQuestion;
+
+// One table drives both the buttons and the weight vector sent to
+// /api/suggest, so the two can't drift. "mobility" is the exception: it picks
+// `profile`, not a weight — wheelchair is a different graph traversal (stairs
+// impassable) and bike a faster one, neither a taste to be scored, so neither
+// enters the weight sum.
+const SUGGEST_QUESTIONS: SuggestQuestion[] = [
+  {
+    id: "household",
+    kind: "weight",
+    label: "Who's moving?",
+    options: [
+      { value: "alone", label: "Just me", weights: {} },
+      {
+        value: "kids_u6",
+        label: "With kids under 6",
+        weights: { kindergarten: 3, playground: 2 },
+      },
+      {
+        value: "kids_school",
+        label: "With school-age kids",
+        weights: { school: 3, playground: 2 },
+      },
+      // Not a dog layer — 71 dog parks across Berlin is too sparse to carry
+      // one (T-017). A dog's daily need is green space, which already has a
+      // question and a layer, so this option just aims that dial at max and
+      // says so in the UI (see the "with a dog" note in the modal).
+      {
+        value: "with_dog",
+        label: "With a dog",
+        weights: { greenspace: 3 },
+      },
+    ],
+  },
+  {
+    id: "mobility",
+    kind: "profile",
+    label: "How do you get around?",
+    // Labels match the profile pills above the map, and the API's profile
+    // names, exactly. "Cycling" here next to a "bike" pill read as two
+    // different things when picking one visibly switched the other.
+    options: [
+      { value: "walk", label: "Walk" },
+      { value: "wheelchair", label: "Wheelchair" },
+      { value: "bike", label: "Bike" },
+    ],
+  },
+  {
+    id: "groceries",
+    kind: "weight",
+    label: "Food shopping?",
+    options: [
+      { value: "often", label: "Most days", weights: { groceries: 3 } },
+      { value: "weekly", label: "Once a week", weights: { groceries: 1 } },
+    ],
+  },
+  {
+    id: "health",
+    kind: "weight",
+    label: "Doctors and pharmacies nearby?",
+    options: [
+      { value: "important", label: "Important", weights: { health: 3 } },
+      { value: "nice", label: "Nice to have", weights: { health: 1 } },
+      { value: "not", label: "Not really", weights: { health: 0 } },
+    ],
+  },
+  {
+    id: "green",
+    kind: "weight",
+    label: "Green space?",
+    options: [
+      { value: "lot", label: "A lot", weights: { greenspace: 3 } },
+      { value: "some", label: "Some", weights: { greenspace: 1 } },
+      { value: "not", label: "Not much", weights: { greenspace: 0 } },
+    ],
+  },
+  {
+    id: "dining",
+    kind: "weight",
+    label: "Eating and drinking out?",
+    options: [
+      { value: "often", label: "Often", weights: { dining: 3 } },
+      { value: "sometimes", label: "Sometimes", weights: { dining: 1 } },
+      { value: "rarely", label: "Rarely", weights: { dining: 0 } },
+    ],
+  },
+];
+
+// Groceries always carries a non-zero weight (3 or 1, never 0 — the question
+// has no "not really" option), so sum(w) can never be zero and the backend's
+// score = sum(w_i * layer_i) / sum(w_i) never divides by it.
+//
+// Max, not last-write: "with a dog" (household) and the green space question
+// can both set `greenspace`, and Object.assign would just let question order
+// decide, silently dropping the dog's request whenever green space happened
+// to be answered afterwards with a lower value. The higher ask always wins.
+const buildSuggestWeights = (
+  answers: SuggestAnswers
+): Partial<Record<ReachLayer, number>> => {
+  const w: Partial<Record<ReachLayer, number>> = {};
+  for (const q of SUGGEST_QUESTIONS) {
+    if (q.kind !== "weight") continue;
+    const opt = q.options.find((o) => o.value === answers[q.id]);
+    if (!opt) continue;
+    for (const [k, v] of Object.entries(opt.weights) as [ReachLayer, number][]) {
+      w[k] = Math.max(w[k] ?? 0, v);
+    }
+  }
+  return w;
+};
+
+// Dropping zero weights here, not just in buildSuggestWeights: a weight of 0
+// ("not really") is a real answer but not a request term the endpoint wants —
+// it already treats an absent layer as "don't care".
+const suggestQueryParam = (w: Partial<Record<ReachLayer, number>>) =>
+  Object.entries(w)
+    .filter(([, v]) => (v ?? 0) > 0)
+    .map(([k, v]) => `${k}:${v}`)
+    .join(",");
+
 export default function MapView() {
   const mapRef = useRef<L.Map | null>(null);
   const isochroneRef = useRef<L.LayerGroup | null>(null);
@@ -245,6 +456,12 @@ export default function MapView() {
   const placesGenRef = useRef(0);
   const drawPlacesRef = useRef<(items: Place[]) => void>(() => {});
   const loadPlacesRef = useRef<(lat: number, lon: number) => void>(() => {});
+  // Suggestion markers get their own layer group, same pattern as places: a
+  // second set of dots the isochrone/places lifecycle must not clear.
+  const suggestLayerRef = useRef<L.LayerGroup | null>(null);
+  const drawSuggestRef = useRef<(cells: SuggestCell[]) => void>(() => {});
+  const focusSuggestionRef = useRef<(c: SuggestCell) => void>(() => {});
+  const suggestAbortRef = useRef<AbortController | null>(null);
   const [copied, setCopied] = useState(false);
   const [helpFocus, setHelpFocus] = useState<"assistant" | undefined>(undefined);
   // Only a deep link carries lat+lon, and only the MCP server hands those out,
@@ -262,6 +479,41 @@ export default function MapView() {
   const [searchError, setSearchError] = useState("");
   // Filled by the same 5s poll that draws the coverage overlay.
   const [areas, setAreas] = useState<Area[]>([]);
+
+  // "Where should I live" questionnaire. One state object for the five
+  // weight-bearing answers (mirrors the `jobs`/`caps` grouping already used
+  // here), profile kept separate since it also drives the isochrone picker
+  // vocabulary — walk, wheelchair or (T-017) bike.
+  //
+  // `suggestAnswers`/`suggestProfile` are the *committed* answer set: the one
+  // the map is drawn from. The modal (T-017) edits a separate draft copy and
+  // only writes back on "Show me" — closing by Escape or the backdrop must
+  // discard in-progress edits, not redraw the map with them.
+  const [suggestAnswers, setSuggestAnswers] = useState<SuggestAnswers>(
+    DEFAULT_SUGGEST_ANSWERS
+  );
+  const [suggestProfile, setSuggestProfile] = useState<
+    "walk" | "wheelchair" | "bike"
+  >("walk");
+  const [suggestModalOpen, setSuggestModalOpen] = useState(false);
+  const [draftAnswers, setDraftAnswers] = useState<SuggestAnswers>(suggestAnswers);
+  const [draftProfile, setDraftProfile] = useState<
+    "walk" | "wheelchair" | "bike"
+  >(suggestProfile);
+  // Returns focus to whichever button opened the modal ("Discover…" the first
+  // time, "edit answers" afterwards) — both render into this one ref, never
+  // both at once.
+  const discoverBtnRef = useRef<HTMLButtonElement | null>(null);
+  // Suggestions are now a mode you enter (T-017), not a control that queries
+  // on every render. This stays false until the first "Show me", so the
+  // fetch effect below has something to gate on: mounting must not fire a
+  // request nobody asked for.
+  const suggestAskedRef = useRef(false);
+  const [suggestCells, setSuggestCells] = useState<SuggestCell[]>([]);
+  const [suggestState, setSuggestState] = useState<
+    "idle" | "loading" | "ok" | "empty" | "unavailable" | "error"
+  >("idle");
+  const [suggestReason, setSuggestReason] = useState("");
 
   const closeHelp = () => {
     setHelp(false);
@@ -372,6 +624,37 @@ export default function MapView() {
           )
           .addTo(g);
       }
+    };
+
+    // Suggestion markers: styled entirely through circleMarker options (no
+    // CSS class), so "best clearly distinguished" holds regardless of
+    // stylesheet — rank 1 is bigger and amber, the rest are smaller and blue.
+    suggestLayerRef.current = L.layerGroup().addTo(map);
+    drawSuggestRef.current = (cells: SuggestCell[]) => {
+      const g = suggestLayerRef.current;
+      if (!g) return;
+      g.clearLayers();
+      cells.forEach((c, i) => {
+        L.circleMarker([c.lat, c.lon], {
+          radius: i === 0 ? 12 : 8,
+          weight: 2,
+          color: "#fff",
+          fillColor: i === 0 ? "#ffb703" : "#3a86ff",
+          fillOpacity: 0.92,
+        })
+          // The name, not the score: "100% match" on ten pins is noise, and the
+          // pin's own position already says where it is. DOM node rather than a
+          // string for the same reason as the popup below — Nominatim's text is
+          // not ours to render as markup.
+          .bindTooltip(
+            Object.assign(document.createElement("span"), {
+              textContent: c.name ?? `#${i + 1}`,
+            }),
+            { direction: "top" }
+          )
+          .on("click", () => focusSuggestionRef.current(c))
+          .addTo(g);
+      });
     };
 
     fetch("/api/place-groups")
@@ -624,8 +907,16 @@ export default function MapView() {
         }
 
         if (!features.length) {
+          // Do not guess at the cause. This fires on a 200 with no bands, which
+          // means the click DID snap to a routable vertex — the server's 400
+          // covers the "no street nearby" case with an exact distance. So the
+          // spot is on the network and simply cannot reach anything in the time
+          // budget: measured on vertex 70954, whose only edge is a 1,764m path,
+          // 21 minutes on foot and therefore empty at 15. The old copy blamed
+          // "stairs or rough surfaces", which is wrong for walk in particular —
+          // stairs are passable there at half speed (PROFILES in layers.ts).
           showToast(
-            `No reachable streets here for "${profileRef.current}". Stairs or rough surfaces may block this spot.`
+            `Nothing reachable within ${data.minutes} min from here on "${profileRef.current}". Try more minutes, or another profile.`
           );
         }
       } catch (err) {
@@ -727,6 +1018,108 @@ export default function MapView() {
       )
       .openOn(map);
     if (window.innerWidth <= 720) setPanelOpen(false);
+  };
+
+  // Same interaction as focusPlace: click a result, the map moves there.
+  // Coordinates only in the popup — the endpoint deliberately returns no
+  // name (T-016 non-goal: reverse-geocoding N results per request would sit
+  // behind the 1 req/s geocodeSlot() gate).
+  // Picking a mobility option previews it immediately: the pill above the map
+  // moves and, if somewhere is already selected, its isochrone redraws in the
+  // new profile. Answering "how do you get around" and watching nothing change
+  // until "Show me" made the question feel disconnected from the map behind it.
+  //
+  // Only the map view is previewed — the *answers* stay draft until submit, so
+  // closing with X still discards them. The profile pill is a view setting
+  // rather than part of the answer set, and leaving the map on the last profile
+  // the user actually clicked is truer than snapping it back.
+  //
+  // redrawRef is a no-op when nothing has been clicked yet, so opening the
+  // questionnaire cold and flipping profiles costs nothing.
+  const previewProfile = (p: "walk" | "wheelchair" | "bike") => {
+    setDraftProfile(p);
+    profileRef.current = p;
+    setProfile(p);
+    redrawRef.current();
+  };
+
+  const focusSuggestion = (c: SuggestCell) => {
+    const map = mapRef.current;
+    if (!map) return;
+    // Switch to the profile the questionnaire was answered with. A suggestion
+    // earned its place by cycling reach or wheelchair reach; drawing it as a
+    // walk would show a different shape than the one that was ranked, which is
+    // the sort of quiet mismatch this project keeps getting caught by.
+    if (profileRef.current !== suggestProfile) {
+      profileRef.current = suggestProfile;
+      setProfile(suggestProfile);
+    }
+    // 14, not 16: a 15-minute walk is roughly a 1.25km radius and overflows the
+    // viewport at 16, so the isochrone we just drew would be mostly off-screen.
+    map.setView([c.lat, c.lon], 14);
+    // Draw the reach from here. Clicking a result and getting only a pin left
+    // the two halves of the product disconnected — the suggestion says "this
+    // place is close to everything" and the isochrone is what shows it.
+    // updateIsochrones owns the marker and lastClickRef, so switching profile
+    // afterwards redraws at this spot rather than the last map click.
+    updateRef.current(c.lat, c.lon);
+    L.popup({ closeButton: false, className: "place-popup" })
+      .setLatLng([c.lat, c.lon])
+      // A DOM node, not an HTML string: the name comes from Nominatim, and
+      // setContent would render it as markup. textContent cannot, and is less
+      // code than an escape helper — same reason the toast at showToast does it.
+      .setContent(
+        Object.assign(document.createElement("b"), {
+          textContent: c.name ?? `${c.lat.toFixed(4)}, ${c.lon.toFixed(4)}`,
+        })
+      )
+      .openOn(map);
+    if (window.innerWidth <= 720) setPanelOpen(false);
+  };
+  focusSuggestionRef.current = focusSuggestion;
+
+  // Opens with a fresh copy of the committed answers, so repeated edit/cancel
+  // cycles can't leak a half-typed draft from a previous open.
+  // What the map was showing before the questionnaire opened, so cancelling can
+  // undo a profile preview. Stored rather than assumed to be suggestProfile:
+  // the pills include stroller, which the questionnaire cannot express, and
+  // snapping a stroller view to "walk" on cancel would discard a choice the
+  // user made outside this modal.
+  const profileBeforeModalRef = useRef(profile);
+
+  const openSuggestModal = () => {
+    setDraftAnswers({ ...suggestAnswers });
+    setDraftProfile(suggestProfile);
+    profileBeforeModalRef.current = profileRef.current;
+    setSuggestModalOpen(true);
+  };
+
+  // Escape / backdrop / × all end here: the draft is simply discarded, and
+  // focus goes back to whichever button opened the modal. That now includes any
+  // profile previewed while it was open — otherwise cancelling could leave the
+  // pill on "bike" while the committed summary line still read "Walk", which is
+  // the mismatch the preview was added to remove.
+  const closeSuggestModal = () => {
+    if (profileRef.current !== profileBeforeModalRef.current) {
+      profileRef.current = profileBeforeModalRef.current;
+      setProfile(profileBeforeModalRef.current);
+      redrawRef.current();
+    }
+    setSuggestModalOpen(false);
+    discoverBtnRef.current?.focus();
+  };
+
+  // "Show me": the only path that commits the draft. Spreading draftAnswers
+  // into a new object guarantees a fresh reference even when nothing in it
+  // changed, so the fetch effect's dependency array always sees a change and
+  // fires — otherwise clicking "Show me" a second time with identical
+  // answers would silently do nothing.
+  const submitSuggest = () => {
+    suggestAskedRef.current = true;
+    setSuggestAnswers({ ...draftAnswers });
+    setSuggestProfile(draftProfile);
+    setSuggestModalOpen(false);
+    discoverBtnRef.current?.focus();
   };
 
   const runSearch = async (e: FormEvent) => {
@@ -848,6 +1241,53 @@ export default function MapView() {
     return () => io.disconnect();
   }, [visible, places.length]);
 
+  // Answers → weights → /api/suggest, debounced so five questions changing in
+  // quick succession fire one request, not five. No routing call happens
+  // here — this is the whole point of T-016: the field is precomputed, so
+  // re-ranking on every answer costs one Postgres aggregate, not a traversal.
+  //
+  // Runs on `suggestAnswers`/`suggestProfile`, the committed values, not the
+  // modal's draft — so this still only fires once per "Show me" (T-017), not
+  // once per button press inside the modal.
+  useEffect(() => {
+    if (!suggestAskedRef.current) return; // nobody has clicked "Show me" yet
+    const t = setTimeout(() => {
+      const w = suggestQueryParam(buildSuggestWeights(suggestAnswers));
+      if (!w) return; // groceries always weights >0; defensive only
+      suggestAbortRef.current?.abort();
+      const ac = new AbortController();
+      suggestAbortRef.current = ac;
+      setSuggestState("loading");
+      fetch(`/api/suggest?profile=${suggestProfile}&w=${encodeURIComponent(w)}`, {
+        signal: ac.signal,
+      })
+        .then((r) => r.json())
+        .then((d: { available: boolean; reason?: string; cells?: SuggestCell[] }) => {
+          if (!d.available) {
+            setSuggestCells([]);
+            setSuggestReason(d.reason ?? "");
+            setSuggestState("unavailable");
+            drawSuggestRef.current([]);
+            return;
+          }
+          const cells = d.cells ?? [];
+          setSuggestCells(cells);
+          setSuggestState(cells.length ? "ok" : "empty");
+          drawSuggestRef.current(cells);
+        })
+        .catch((err) => {
+          if (err?.name === "AbortError") return; // superseded by a newer answer
+          setSuggestCells([]);
+          // Not "empty": a redis or postgres blip telling someone there are no
+          // good places to live, when the truth is we failed to look, is the
+          // one wrong answer this panel must never give.
+          setSuggestState("error");
+          drawSuggestRef.current([]);
+        });
+    }, 400);
+    return () => clearTimeout(t);
+  }, [suggestAnswers, suggestProfile]);
+
   const kindLabel = (k: string) => k.replace(/_/g, " ");
 
   // Only user-imported areas: the shipped city is seeded into the same table
@@ -891,6 +1331,23 @@ export default function MapView() {
   const shown = activeGroup
     ? places.filter((pl) => activeGroup.kinds.includes(pl.kind))
     : places;
+
+  // Layers actually asked about, in the current answer set — drives which
+  // per-cell times (or "no X in 30 min") each result row prints.
+  const currentWeights = buildSuggestWeights(suggestAnswers);
+  const suggestLayers = (Object.keys(currentWeights) as ReachLayer[]).filter(
+    (l) => (currentWeights[l] ?? 0) > 0
+  );
+
+  // Compact stand-in for the questions once "Show me" has been clicked — the
+  // panel shows what was asked, not the ranked list (T-017: that lives on
+  // the map).
+  const suggestSummary = SUGGEST_QUESTIONS.map((q) => {
+    const value = q.kind === "profile" ? suggestProfile : suggestAnswers[q.id];
+    return q.options.find((o) => o.value === value)?.label;
+  })
+    .filter(Boolean)
+    .join(" · ");
 
   return (
     <div className="app">
@@ -977,6 +1434,119 @@ export default function MapView() {
               data yet. Click one to import it.
             </p>
           )}
+
+          <section className="suggest">
+            <div className="places-head">
+              <h2>Where should I live?</h2>
+            </div>
+            <p className="muted suggest-honesty">
+              Ranks reachability only — not rent, not noise, not transit.
+            </p>
+
+            {suggestState === "idle" ? (
+              // T-017: no always-visible questionnaire. Suggestions are a
+              // mode you enter, not a control that crowds this panel.
+              <button
+                ref={discoverBtnRef}
+                type="button"
+                className="discover-btn"
+                onClick={openSuggestModal}
+              >
+                Discover suitable living locations in Berlin
+              </button>
+            ) : (
+              <>
+                <div className="suggest-summary">
+                  <p className="suggest-summary-text">{suggestSummary}</p>
+                  <button
+                    ref={discoverBtnRef}
+                    type="button"
+                    className="linkish"
+                    onClick={openSuggestModal}
+                  >
+                    edit answers
+                  </button>
+                </div>
+
+                {suggestState === "unavailable" && (
+                  <p className="muted">
+                    {suggestReason ||
+                      "Suggestions are only available for Berlin right now."}
+                  </p>
+                )}
+                {suggestState === "loading" && (
+                  <p className="muted">Ranking…</p>
+                )}
+                {suggestState === "empty" && (
+                  <p className="muted">No matches for this answer set.</p>
+                )}
+                {suggestState === "error" && (
+                  <p className="suggest-miss">
+                    Could not reach the server — this is not a result, try again.
+                  </p>
+                )}
+
+                {suggestState === "ok" && suggestCells.length > 0 && (
+                  <>
+                    <p className="muted suggest-tie-note">
+                      {scoresAreTied(suggestCells)
+                        ? `${suggestCells.length} areas, all equally close to what you picked — they are alternatives, not a ranking.`
+                        : `${suggestCells.length} areas, best first.`}
+                    </p>
+                    <ul className="place-list suggest-results">
+                      {suggestCells.map((c, i) => (
+                        <li key={`${c.lat},${c.lon}`}>
+                          <button onClick={() => focusSuggestion(c)} title="Show on map">
+                            {/* Plain enumeration, not a score. A bare bullet
+                                read as a broken list marker, and a normalised
+                                0-100 would be worse than either: stretching
+                                1.0000-0.9942 across a full range manufactures a
+                                large-looking difference out of 0.6%. The note
+                                above already says these are alternatives, so
+                                the number is just "which one am I looking at".
+                                Revisit once density gives a real spread. */}
+                            <span className="pl-min suggest-rank">{i + 1}</span>
+                            <span className="pl-body">
+                              <span className="pl-name">
+                                {c.name ??
+                                  `${c.lat.toFixed(4)}, ${c.lon.toFixed(4)}`}
+                              </span>
+                              <span className="pl-kind suggest-layers">
+                                {suggestLayers.map((layer) => {
+                                  const secs = c.layers[layer];
+                                  // The count is the half of the score the time
+                                  // cannot show: every top result is "<1′" from
+                                  // everything, and what separates them is 140
+                                  // shops nearby versus 55 (T-019).
+                                  const near = c.nearby?.[layer];
+                                  return (
+                                    <span
+                                      key={layer}
+                                      className={
+                                        secs == null
+                                          ? "suggest-layer suggest-miss"
+                                          : "suggest-layer"
+                                      }
+                                    >
+                                      {secs == null
+                                        ? `no ${LAYER_LABEL[layer]} in 30 min`
+                                        : `${LAYER_LABEL[layer]} ${reachLabel(secs)}${
+                                            near ? ` · ${near}` : ""
+                                          }`}
+                                    </span>
+                                  );
+                                })}
+                              </span>
+                            </span>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                )}
+              </>
+            )}
+          </section>
 
           <section className="places">
             <div className="places-head">
@@ -1174,9 +1744,146 @@ export default function MapView() {
       </div>
 
       {help && <HelpPanel onClose={closeHelp} focus={helpFocus} />}
+      {suggestModalOpen && (
+        <SuggestModal
+          answers={draftAnswers}
+          profile={draftProfile}
+          onAnswer={(id, value) =>
+            setDraftAnswers((a) => ({ ...a, [id]: value }))
+          }
+          onProfile={previewProfile}
+          onSubmit={submitSuggest}
+          onClose={closeSuggestModal}
+        />
+      )}
     </div>
   );
 }
+
+// T-017: the questionnaire moved off the always-visible panel and into this
+// modal, opened by the "Discover…" button and closed by "Show me", Escape or
+// the backdrop. It edits a draft only — MapView commits it on submit, so
+// dismissing the modal any other way is a no-op on the map.
+function SuggestModal({
+  answers,
+  profile,
+  onAnswer,
+  onProfile,
+  onSubmit,
+  onClose,
+}: {
+  answers: SuggestAnswers;
+  profile: "walk" | "wheelchair" | "bike";
+  onAnswer: (id: keyof SuggestAnswers, value: string) => void;
+  onProfile: (value: "walk" | "wheelchair" | "bike") => void;
+  onSubmit: () => void;
+  onClose: () => void;
+}) {
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    // Focus moves into the modal on open; MapView returns it to the trigger
+    // button on close (both close paths route through onClose/onSubmit).
+    dialogRef.current?.focus();
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      // Minimal Tab wrap — no focus-trap library — so Tab can't leak past
+      // the modal onto the map hidden behind the backdrop.
+      if (e.key === "Tab" && dialogRef.current) {
+        const focusables = dialogRef.current.querySelectorAll<HTMLElement>(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        );
+        if (!focusables.length) return;
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    // Fixed, full-viewport, above the map's z-index: this is also what stops
+    // the map scrolling or zooming while the modal is open — the backdrop
+    // physically intercepts every pointer and wheel event before Leaflet
+    // ever sees one.
+    <div className="suggest-modal-backdrop" onClick={onClose}>
+      <div
+        className="suggest-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Where should I live?"
+        tabIndex={-1}
+        ref={dialogRef}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="suggest-modal-head">
+          <h2>Where should I live?</h2>
+          <button type="button" aria-label="Close" onClick={onClose}>
+            ×
+          </button>
+        </div>
+        <p className="muted suggest-honesty">
+          Ranks reachability only — not rent, not noise, not transit.
+        </p>
+
+        {SUGGEST_QUESTIONS.map((q) => (
+          <div className="suggest-q" key={q.id}>
+            <div className="suggest-q-label">{q.label}</div>
+            <div className="seg" role="group" aria-label={q.label}>
+              {q.options.map((o) => (
+                <button
+                  key={o.value}
+                  type="button"
+                  aria-pressed={
+                    q.kind === "profile"
+                      ? profile === o.value
+                      : answers[q.id] === o.value
+                  }
+                  onClick={() =>
+                    q.kind === "profile"
+                      ? onProfile(o.value as "walk" | "wheelchair" | "bike")
+                      : onAnswer(q.id, o.value)
+                  }
+                >
+                  {o.label}
+                </button>
+              ))}
+            </div>
+
+            {q.id === "mobility" && profile === "bike" && (
+              <p className="muted suggest-note">
+                Bike ignores one-way streets, so results are slightly
+                optimistic on contraflow.
+              </p>
+            )}
+            {q.id === "household" && answers.household === "with_dog" && (
+              <p className="muted suggest-note">
+                read as: green space matters a lot
+              </p>
+            )}
+          </div>
+        ))}
+
+        <button type="button" className="suggest-submit" onClick={onSubmit}>
+          Show me
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // Simple debounce utility
 function debounce(fn: (...args: any[]) => void, delay: number) {
   let timeout: ReturnType<typeof setTimeout>;

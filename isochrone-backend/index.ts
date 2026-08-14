@@ -9,6 +9,25 @@ import os from "os";
 import path from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
+import {
+  REACH_LAYERS,
+  REACH_PROFILES,
+  REACH_DECAY_SECONDS,
+  ReachProfile,
+  REACH_SPREAD_DEGREES,
+  REACH_SPREAD_METERS,
+  REACH_MAX_WEIGHT,
+  DENSITY_PLENTY,
+  DENSITY_FLOOR,
+  nearbyUpdateSql,
+  MAX_SNAP_METERS,
+  COVERAGE_GRID_DEGREES,
+  COVERAGE_EXPAND_DEGREES,
+  COVERAGE_SIMPLIFY_DEGREES,
+  PROFILES,
+  ProfileName,
+  costExpr,
+} from "./layers";
 
 const execFileAsync = promisify(execFile);
 
@@ -74,33 +93,6 @@ const pool = new Pool({
   statement_timeout: 15000,
 });
 
-// Walking speed in m/s, plus per-way-type multipliers (0 = impassable).
-// tag_id values come from the `configuration` table osm2pgrouting writes:
-// 103 path, 104 steps, 105 living_street, 107 track.
-// tag_id 113 (dedicated cycleway) is impassable on foot, so the three
-// pedestrian profiles are unchanged by its arrival.
-//
-// `bike` at 4.2 m/s ≈ 15 km/h, an ordinary urban cycling average. It rides
-// footways and pedestrian zones at pushing pace rather than treating them as
-// walls, because a rider dismounts rather than turns back.
-//
-// It deliberately ignores one-way restrictions: osm2pgrouting records the
-// `oneway` tag but not `oneway:bicycle=no`, and Berlin permits contraflow
-// cycling on most one-way streets — enforcing the column we have would block
-// streets riders legally use, which is the more wrong of the two answers.
-const PROFILES = {
-  walk: { speed: 1.4, factors: { 104: 0.5, 113: 0 } },
-  stroller: { speed: 1.2, factors: { 104: 0, 103: 0.6, 107: 0.6, 113: 0 } },
-  wheelchair: {
-    speed: 0.9,
-    factors: { 104: 0, 103: 0, 107: 0, 105: 0.9, 113: 0 },
-  },
-  bike: {
-    speed: 4.2,
-    factors: { 104: 0, 101: 0.25, 102: 0.3, 103: 0.6, 107: 0.5 },
-  },
-} as const;
-
 // MAX_MINUTES bounds CPU, but it was calibrated at walking speed: cost tracks
 // the *area* the bbox pre-filter hands pgRouting, so 25min of cycling covers
 // 9x the ground and measured 21s on the production box — past the 15s
@@ -112,7 +104,6 @@ const PROFILES = {
 // radius — enough that the two profiles plainly differ — for 3.3s, where the
 // next step up costs 8s of first-click latency to gain little.
 const MAX_REACH_M = parseInt(process.env.MAX_REACH_M ?? "2520", 10);
-type ProfileName = keyof typeof PROFILES;
 
 const maxMinutesFor = (p: ProfileName) =>
   Math.min(MAX_MINUTES, Math.floor(MAX_REACH_M / (60 * PROFILES[p].speed)));
@@ -237,8 +228,115 @@ const ensureAreasTable = async () => {
     -- coordinates in that case. No backfill for existing rows: this is stamped
     -- once, at import time, same as pois_at.
     ALTER TABLE public.areas ADD COLUMN IF NOT EXISTS name text;
+    -- NULL = the graph footprint has not been dissolved for this area yet, and
+    -- /api/coverage falls back to its bbox. Backfilled once at startup rather
+    -- than by a migration, because it is derived data that any schema can
+    -- regenerate from its own vertices. See COVERAGE_GRID_DEGREES in layers.ts
+    -- for why the overlay must not be drawn from bbox.
+    ALTER TABLE public.areas ADD COLUMN IF NOT EXISTS coverage geometry(MultiPolygon, 4326);
     CREATE INDEX IF NOT EXISTS idx_areas_bbox ON public.areas USING GIST (bbox);
   `);
+  // Names for suggestion results, keyed on coordinates rather than cell_id
+  // because cell ids are reassigned by every precompute while the grid is
+  // deterministic. NULL name = Nominatim answered but had nothing, which is a
+  // real answer and must not be retried on a loop; the row's existence is what
+  // stops the retry. Separate from the Redis revgeo: cache on purpose — that
+  // one has a 7-day TTL and does not survive a flush, and re-asking a public
+  // service for 275 places every time someone clears a cache is not acceptable
+  // use of it.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS public.place_names (
+      lat  numeric(8,4) NOT NULL,
+      lon  numeric(8,4) NOT NULL,
+      name text,
+      looked_up_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (lat, lon)
+    );
+  `);
+  // T-016: the reach field — seconds from every routable cell to its nearest
+  // amenity, per layer and profile — precomputed offline by
+  // scripts/precompute-reach.ts (see layers.ts for why offline, and why
+  // absence rather than a sentinel value means unreachable). Lives in
+  // DEFAULT_SCHEMA, not public, because it is derived from that schema's
+  // graph the same way ways_vertices_pgr is; imported area_* schemas never
+  // get one (see /api/suggest below). Created empty here so a fresh stack has
+  // these tables rather than missing them — the endpoint can then tell "no
+  // data yet" (empty) from a genuine bug (missing) instead of throwing.
+  //
+  // Guarded like the shipped-city INSERT below: DEFAULT_SCHEMA itself may not
+  // exist yet on a fresh deployment with no city imported, and CREATE TABLE
+  // inside a schema that doesn't exist throws.
+  await pool
+    .query(
+      `CREATE TABLE IF NOT EXISTS ${DEFAULT_SCHEMA}.reach_cells (
+         id   serial PRIMARY KEY,
+         geom geometry(Point,4326) NOT NULL UNIQUE
+       );
+       CREATE TABLE IF NOT EXISTS ${DEFAULT_SCHEMA}.reach (
+         cell_id integer  NOT NULL REFERENCES ${DEFAULT_SCHEMA}.reach_cells(id),
+         layer   text     NOT NULL,
+         profile text     NOT NULL,
+         seconds smallint NOT NULL,
+         PRIMARY KEY (cell_id, layer, profile)
+       );
+       CREATE INDEX IF NOT EXISTS idx_reach_layer_profile
+         ON ${DEFAULT_SCHEMA}.reach (layer, profile);`
+    )
+    .catch((err) =>
+      console.log(`ℹ️ no ${DEFAULT_SCHEMA} schema for reach tables yet:`, err.message)
+    );
+
+  // Each of these runs as its OWN statement, with its own catch, deliberately.
+  // Grouping migrations into one multi-statement query means the slowest one
+  // takes the rest down with it: `CREATE INDEX ... USING GIST` over 134,280 cells
+  // exceeds the 15s statement_timeout, and when it did, the `ALTER ... ADD COLUMN
+  // nearby` in the same block rolled back — which then failed all 648 warm-pass
+  // answers and, because that left the naming set empty, produced a `VALUES ()`
+  // syntax error three layers away. The same shape cost us the coverage column
+  // earlier (ADR-0020), so it is fixed here rather than noted again.
+  //
+  // statement_timeout is lifted per statement, on one dedicated client, because
+  // index builds are legitimately slower than any request should ever be.
+  const migrations: [string, string][] = [
+    [
+      "reach.nearby",
+      `ALTER TABLE ${DEFAULT_SCHEMA}.reach ADD COLUMN IF NOT EXISTS nearby smallint`,
+    ],
+    [
+      "reach_cells GIST",
+      `CREATE INDEX IF NOT EXISTS idx_reach_cells_geom
+         ON ${DEFAULT_SCHEMA}.reach_cells USING GIST (geom)`,
+    ],
+    // Functional indexes on the projected geometry. Without BOTH of these the
+    // density join has no index to use and falls back to a nested loop over
+    // 134,280 cells x 24,986 POIs — measured still running after 11 minutes,
+    // against 5.8s with them.
+    [
+      "reach_cells UTM GIST",
+      `CREATE INDEX IF NOT EXISTS idx_reach_cells_geom_utm
+         ON ${DEFAULT_SCHEMA}.reach_cells USING GIST (ST_Transform(geom, 25833))`,
+    ],
+    [
+      "pois UTM GIST",
+      `CREATE INDEX IF NOT EXISTS idx_pois_geom_utm
+         ON public.pois USING GIST (ST_Transform(geom, 25833))`,
+    ],
+  ];
+  for (const [label, sql] of migrations) {
+    const client = await pool.connect();
+    try {
+      await client.query("SET statement_timeout = 0");
+      await client.query(sql);
+    } catch (err) {
+      console.log(`ℹ️ migration ${label} skipped:`, (err as Error).message);
+    } finally {
+      // The pool reuses this connection for requests, where an unlimited
+      // statement_timeout is exactly what the 15s default exists to prevent.
+      await client.query("SET statement_timeout = '15s'").catch(() => {});
+      client.release();
+    }
+  }
+
   // The shipped city is a schema, not an imported area. Give it a row so the
   // map can draw every covered region from one endpoint instead of special
   // casing it. Harmless if the schema isn't present (fresh deployment).
@@ -286,6 +384,135 @@ const ensureAreasTable = async () => {
      RETURNING id`
   );
   if (stuck.rowCount) console.log(`↻ re-queued ${stuck.rowCount} stuck import(s)`);
+};
+
+// Dissolve a schema's routable vertices into the polygon the map should veil
+// around. See COVERAGE_GRID_DEGREES in layers.ts for the measurements and for
+// why a bbox is the wrong shape.
+//
+// main_component only, matching the vertex snap in /api/isochrone: a click that
+// lands on a disconnected fragment routes nowhere, so drawing it as covered
+// would reintroduce the same lie at a smaller scale.
+const computeCoverage = async (areaId: number, schemaName: string) => {
+  const r = await pool.query<{ g: string | null }>(
+    `WITH g AS (
+       SELECT DISTINCT ST_SnapToGrid(geom, $1) AS c
+         FROM ${schemaName}.ways_vertices_pgr
+        WHERE main_component
+     ),
+     m AS (
+       SELECT ST_SimplifyPreserveTopology(ST_Union(ST_Expand(c, $2)), $3) AS mask
+         FROM g
+     )
+     -- Clipped to the area's own bbox, which is not cosmetic. ST_Expand pushes
+     -- the mask up to EXPAND degrees (~222m) past vertices on the box edge, and
+     -- /api/isochrone selects a schema by bbox containment — so an unclipped
+     -- mask claims a rim that no schema will ever route, and the click is
+     -- refused inside undimmed ground. Measured before clipping: 33 of 40
+     -- sampled points refused, one of them 6,086m from any street, because
+     -- area_61's mask spilled outside area_61's bbox into a part of Berlin that
+     -- Berlin's own mask correctly excludes.
+     SELECT ST_Multi(ST_Intersection(m.mask, a.bbox))::text AS g
+       FROM m JOIN public.areas a ON a.id = $4`,
+    [
+      COVERAGE_GRID_DEGREES,
+      COVERAGE_EXPAND_DEGREES,
+      COVERAGE_SIMPLIFY_DEGREES,
+      areaId,
+    ]
+  );
+  return r.rows[0]?.g ?? null;
+};
+
+const storeCoverage = async (areaId: number, schemaName: string) => {
+  try {
+    const mask = await computeCoverage(areaId, schemaName);
+    if (!mask) {
+      console.warn(`⚠️ ${schemaName}: no routable vertices, coverage left as bbox`);
+      return;
+    }
+    await pool.query(`UPDATE public.areas SET coverage = $2 WHERE id = $1`, [
+      areaId,
+      mask,
+    ]);
+  } catch (err) {
+    // A failed dissolve must not fail an import or block startup — the COALESCE
+    // in /api/coverage keeps serving the bbox, which is what shipped before.
+    console.error(`⚠️ coverage for ${schemaName} failed:`, (err as Error).message);
+  }
+};
+
+// Fills reach.nearby from THIS machine's public.pois (T-019). Deliberately
+// computed where it is served rather than shipped in the dump: the count is a
+// straight-line spatial join, cheap enough to redo (~6s per profile, measured),
+// and recomputing locally is what keeps density free of the build-vs-serve POI
+// drift that ADR-0022 records for `seconds`.
+//
+// Runs when any row is missing it — after a restore, or after the POI sweep has
+// changed what is on the ground. Uses nearbyUpdateSql from layers.ts so the
+// server and scripts/precompute-reach.ts cannot disagree about the radius or the
+// projection; a guard that lived in only one of them is what caused T-018.
+const backfillNearby = async () => {
+  try {
+    const todo = await pool.query<{ profile: string }>(
+      `SELECT DISTINCT profile FROM ${DEFAULT_SCHEMA}.reach WHERE nearby IS NULL`
+    );
+    if (!todo.rowCount) return;
+    const t0 = Date.now();
+    for (const { profile } of todo.rows) {
+      if (!(REACH_PROFILES as readonly string[]).includes(profile)) continue;
+      // Own client with the timeout lifted: this is a spatial join over every
+      // cell and every POI of seven layers — 5.8s for dining alone, measured —
+      // so it cannot run under the 15s request timeout. It is startup work, not
+      // request work, and nothing serves from it until it lands.
+      const client = await pool.connect();
+      try {
+        await client.query("SET statement_timeout = 0");
+        await client.query(nearbyUpdateSql(DEFAULT_SCHEMA, profile as ReachProfile));
+      } finally {
+        await client.query("SET statement_timeout = '15s'").catch(() => {});
+        client.release();
+      }
+    }
+    console.log(
+      `📊 density backfilled for ${todo.rowCount} profile(s) in ${Date.now() - t0}ms`
+    );
+  } catch (err) {
+    // Never fatal. A NULL nearby scores exactly as the field did before density
+    // existed (see COALESCE in scoreSuggestions), so the feature degrades to the
+    // old behaviour rather than breaking the endpoint.
+    if ((err as any).code === "42P01" || (err as any).code === "42703") return;
+    console.error("⚠️ density backfill failed:", (err as Error).message);
+  }
+};
+
+// One-off per area, not a migration: derived from vertices, so any schema can
+// regenerate it. Serial rather than concurrent — this runs at startup alongside
+// the queue drain and the suggest warm pass, and Berlin's dissolve alone reads
+// 618,345 vertices.
+const backfillCoverage = async () => {
+  let pending;
+  try {
+    pending = await pool.query<{ id: number; schema_name: string }>(
+      `SELECT id, schema_name FROM public.areas
+        WHERE status = 'ready' AND coverage IS NULL ORDER BY created_at`
+    );
+  } catch (err) {
+    // Same 42703 case as /api/coverage: the column's ALTER lost to a precompute
+    // holding public.areas. Nothing to backfill into yet — the endpoint is
+    // serving bboxes and the next restart will pick this up.
+    if ((err as any).code !== "42703") throw err;
+    console.warn("⚠️ areas.coverage missing; serving bboxes until it exists");
+    return;
+  }
+  if (!pending.rowCount) return;
+  const t0 = Date.now();
+  for (const row of pending.rows) await storeCoverage(row.id, row.schema_name);
+  console.log(
+    `🗺️ dissolved coverage for ${pending.rowCount} area(s) in ${
+      Date.now() - t0
+    }ms`
+  );
 };
 
 // Which schema answers for this point: the smallest imported area containing
@@ -350,10 +577,9 @@ const evictToFit = async () => {
   return true;
 };
 
-// A click farther than this from any routable street is outside the imported
-// area. In-city snaps measure 7–67m; Paris would otherwise snap to Berlin's
-// westernmost vertex and return a silent empty result.
-const MAX_SNAP_M = 500;
+// Moved to layers.ts as MAX_SNAP_METERS so the precompute is bound by the same
+// number — it was unbounded until this constant was shared, see that comment.
+const MAX_SNAP_M = MAX_SNAP_METERS;
 
 // Coverage extent for the 400 message, memoized per schema — a single cached
 // string would go stale the moment a new area is imported.
@@ -366,19 +592,6 @@ const getCoverage = async (schema: string) => {
     coverageBboxes.set(schema, r.rows[0]?.b ?? "unknown");
   }
   return coverageBboxes.get(schema);
-};
-
-// Builds the cost expression pgr_drivingDistance routes on. Numbers only —
-// no user input reaches this string (profile names are whitelisted below).
-const costExpr = (name: ProfileName) => {
-  const { speed, factors } = PROFILES[name];
-  const cases = Object.entries(factors).map(
-    ([tag, f]) =>
-      `WHEN tag_id = ${tag} THEN ${f === 0 ? "-1" : `length_m / ${speed * f}`}`
-  );
-  return cases.length
-    ? `CASE ${cases.join(" ")} ELSE length_m / ${speed} END`
-    : `length_m / ${speed}`;
 };
 
 // Checked before the rate limiter so monitoring never consumes quota.
@@ -424,12 +637,69 @@ app.get("/api/areas", pollLimiter, async (_, res) => {
 // Merged coverage as one geometry. The map veils everything *outside* this,
 // and overlapping boxes would otherwise punch the veil twice and re-fill the
 // overlap (SVG evenodd), showing a dark patch inside covered ground.
+//
+// COALESCE(coverage, bbox): the dissolved graph footprint where it has been
+// computed, the old rectangle where it has not, so an area that has not been
+// dissolved yet over-claims exactly as it always did rather than vanishing.
+//
+// The 42703 branch is not paranoia, it is measured. ALTER TABLE public.areas ADD
+// COLUMN needs ACCESS EXCLUSIVE, and precompute-reach.ts joins public.areas
+// inside the transaction that wraps each ~400s traversal, so the column cannot
+// be added while a precompute is running — a 150s lock_timeout was not close to
+// enough. When that ALTER fails it takes the whole DDL block down with it, which
+// left this endpoint 500ing on a 5-second poll. Deploying code that assumes its
+// own migration succeeded is the bug; falling back to bbox is the fix.
+//
+// Do NOT wait indefinitely for that lock instead: a queued ACCESS EXCLUSIVE
+// request blocks every ACCESS SHARE behind it, which would stall the precompute
+// rather than the migration.
+// Cached, because the union is not cheap and the poll is per-client: measured
+// 290ms and 283KB for 35 areas, every 5 seconds, which is ~6% of one CX23 core
+// per visitor before anyone has asked for an isochrone. The mask got 14x bigger
+// when its grid was tightened to stop over-claiming (COVERAGE_GRID_DEGREES),
+// which is what made this worth caching rather than just recomputing.
+//
+// Keyed on a fingerprint rather than invalidated by hand: coverage changes when
+// an area becomes ready, is evicted, or gets its mask backfilled, and those
+// writes are spread across the importer, the evictor and startup. Three counts
+// over a 35-row table cost microseconds and cannot silently go stale the way a
+// forgotten invalidation call can. Express's ETag then turns the repeat polls
+// into 304s with no body, so the wire cost is already near zero — this is about
+// the database, not the network.
+let coverageCache: { key: string; body: unknown } | null = null;
+
 app.get("/api/coverage", pollLimiter, async (_, res) => {
-  const r = await pool.query(
-    `SELECT ST_AsGeoJSON(ST_Union(bbox))::jsonb AS g
-       FROM public.areas WHERE status = 'ready'`
-  );
-  res.json(r.rows[0]?.g ?? null);
+  const withCoverage = `SELECT ST_AsGeoJSON(ST_Union(COALESCE(coverage, bbox)))::jsonb AS g
+                          FROM public.areas WHERE status = 'ready'`;
+  const bboxOnly = `SELECT ST_AsGeoJSON(ST_Union(bbox))::jsonb AS g
+                      FROM public.areas WHERE status = 'ready'`;
+
+  let key = "nokey";
+  try {
+    const f = await pool.query(
+      `SELECT count(*)::text || ':' || COALESCE(max(id), 0)::text || ':' ||
+              count(coverage)::text AS k
+         FROM public.areas WHERE status = 'ready'`
+    );
+    key = f.rows[0].k;
+    if (coverageCache?.key === key) {
+      res.json(coverageCache.body);
+      return;
+    }
+  } catch (err) {
+    if ((err as any).code !== "42703") throw err; // column not added yet
+  }
+
+  let r;
+  try {
+    r = await pool.query(withCoverage);
+  } catch (err) {
+    if ((err as any).code !== "42703") throw err; // 42703 = undefined_column
+    r = await pool.query(bboxOnly);
+  }
+  const body = r.rows[0]?.g ?? null;
+  if (key !== "nokey") coverageCache = { key, body };
+  res.json(body);
 });
 
 app.get("/api/areas/:id", pollLimiter, async (req: any, res: any) => {
@@ -1014,6 +1284,10 @@ const runImport = async (areaId: number) => {
       `UPDATE public.areas SET status = 'ready', name = $2 WHERE id = $1`,
       [areaId, name]
     );
+    // After 'ready', not before: the veil should lift the moment the area can be
+    // routed on, and a dissolve failure must not strand a good import as
+    // permanently unready.
+    await storeCoverage(areaId, schemaName);
     console.log(
       `✅ imported ${schemaName} (${counts.rows[0].ways} ways) in ${
         Date.now() - start
@@ -1191,8 +1465,14 @@ const reachableEdgesSql = (
       'SELECT id::integer AS id, source::integer, target::integer,
         ${costExpr(profile)} AS cost, ${costExpr(profile)} AS reverse_cost
        FROM ${schema}.ways WHERE ${bbox}',
-      (SELECT id FROM ${schema}.ways_vertices_pgr WHERE main_component
-        ORDER BY geom <-> ST_SetSRID(ST_MakePoint(${lon.toFixed(6)}, ${lat.toFixed(
+      (SELECT v.id FROM ${schema}.ways_vertices_pgr v
+        WHERE v.main_component
+          AND EXISTS (
+            SELECT 1 FROM ${schema}.ways w
+             WHERE (w.source = v.id OR w.target = v.id)
+               AND (${costExpr(profile)}) > 0
+          )
+        ORDER BY v.geom <-> ST_SetSRID(ST_MakePoint(${lon.toFixed(6)}, ${lat.toFixed(
     6
   )}), 4326) LIMIT 1)::integer,
       ${maxCost}::double precision)
@@ -1226,10 +1506,12 @@ app.get("/api/amenities", async (req: any, res: any) => {
   const limit = Math.min(3000, parseInt(req.query.limit ?? "3000", 10) || 3000);
 
   const { schema, poisLoaded } = await resolveSchema(lat, lon);
-  // `poi2` since poisLoaded joined the body: entries cached under the old key
-  // answer without the field, and a 24h TTL outlives any deploy. Bump the
-  // prefix on the next shape change too — it beats remembering to flush.
-  const key = `poi2:${schema}:${lat.toFixed(5)},${lon.toFixed(
+  // `poi3` since the vertex snap became profile-aware: a click that had landed
+  // on a cycleway-only vertex cached an empty place list on foot, and those are
+  // the entries the fix repairs. The original `poi2` bump was for poisLoaded
+  // joining the body. A 24h TTL outlives any deploy, so bump the prefix on the
+  // next change too — it beats remembering to flush.
+  const key = `poi3:${schema}:${lat.toFixed(5)},${lon.toFixed(
     5
   )}:${minutes}:${profile}:${kinds.join("|")}:${limit}`;
 
@@ -1302,6 +1584,395 @@ app.get("/api/place-groups", (_, res) => {
   res.json(PLACE_GROUPS);
 });
 
+// --- livability suggestions (T-016) -----------------------------------------
+// GET /api/suggest scores DEFAULT_SCHEMA.reach (berlin.reach in production) —
+// precomputed offline by scripts/precompute-reach.ts (layers.ts explains why
+// offline, and why an absent row means unreachable rather than a sentinel
+// value) — against a user's weight vector. No routing on this path: it is
+// one aggregate over ~134,280 precomputed cells, which is what lets the
+// questionnaire re-rank the whole map without a pgRouting call. Berlin only;
+// an imported area_* schema never gets a reach field of its own, so there is
+// no schema-resolution step here the way /api/isochrone and /api/amenities have.
+
+// Weight 0 means "ignore this layer", not "score it at zero", so those
+// entries are dropped rather than carried through as no-op joins. Sorted so
+// the same answer set keys the cache the same way regardless of arrival order.
+const normalizeWeights = (weights: Record<string, number>): [string, number][] =>
+  Object.entries(weights)
+    .filter(([, w]) => w > 0)
+    .sort(([a], [b]) => a.localeCompare(b));
+
+// suggest2: bumped from suggest1 for T-017 — the decay went from a single
+// REACH_DECAY_SECONDS to a per-profile lookup (bike scores on 300s, not
+// 900s) and the answer space grew from 324 to 648, so both the scoring
+// formula and the key space changed. Bump this prefix whenever
+// DEFAULT_SCHEMA.reach is reloaded with a different shape, or the score
+// formula below changes — same precedent as poi2 above (/api/amenities).
+// T-016's verification lost half an hour to stale entries under an
+// unchanged prefix; do not repeat that.
+//
+// suggest3: bumped again because the tie-break moved from lat/lon to
+// md5(cell_id) (see the spread CTE). The scores are identical; the ten cells
+// chosen out of a tied set are not, so every suggest2: entry holds a
+// southern-edge answer this code would no longer produce. This bump is also
+// what makes the completed Berlin precompute safe to cut over to — the reach
+// table was reloaded with a different shape, which is the first condition
+// above, and it caught us anyway during local verification: 14/14 passed
+// against suggest2: entries warmed while the field was still half-computed.
+//
+// suggest4: density joined the formula (T-019), so every score changes and the
+// body gained a `nearby` key. Both reasons on their own would require this.
+const suggestCacheKey = (profile: string, entries: [string, number][]) =>
+  `suggest4:${profile}:${entries.map(([l, w]) => `${l}:${w}`).join(",")}`;
+
+// ST_SnapToGrid guarantees at most one candidate per coarse cell but nothing
+// about the gap BETWEEN cells — two candidates straddling a grid boundary can
+// land a few metres apart. Measured against a real reach field: 139m between
+// two "spread" results, for a 700m criterion. So the grid snap below is kept
+// only as a cheap pre-filter (LIMIT 200 instead of 10), and the actual 10 are
+// picked greedily by real distance in scoreSuggestions.
+//
+// Haversine, not raw degree deltas: at 52.5°N one degree of longitude is only
+// ~68% the width of one degree of latitude, so comparing lat/lon deltas
+// directly gives a thinning radius that is correct north-south and ~30% too
+// small east-west.
+const haversineM = (aLat: number, aLon: number, bLat: number, bLon: number) => {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(bLat - aLat);
+  const dLon = toRad(bLon - aLon);
+  const s =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLon / 2) ** 2;
+  return 2 * 6371000 * Math.asin(Math.sqrt(s)); // 6,371,000m = mean Earth radius
+};
+
+// Runs the scored aggregate and caches it. Shared by the live endpoint below
+// and the warm pass near the bottom of this file, so the two can never
+// disagree about the formula.
+const scoreSuggestions = async (profile: string, entries: [string, number][]) => {
+  const layers = entries.map(([l]) => l);
+  const weights = entries.map(([, w]) => w);
+  const totalWeight = weights.reduce((a, b) => a + b, 0);
+
+  // DEFAULT_SCHEMA.reach is empty until the precompute has run, and absent
+  // entirely on a fresh stack whose DEFAULT_SCHEMA hasn't been imported yet
+  // (see ensureAreasTable above). Both read the same to the caller — "not
+  // ready", not a 500 — so the UI can hide the panel on `available: false`.
+  let hasRows = false;
+  try {
+    const has = await pool.query(
+      `SELECT EXISTS (SELECT 1 FROM ${DEFAULT_SCHEMA}.reach LIMIT 1) AS has_rows`
+    );
+    hasRows = has.rows[0].has_rows;
+  } catch (err) {
+    if ((err as any).code !== "42P01") throw err; // 42P01 = undefined_table
+  }
+  if (!hasRows) {
+    return {
+      available: false as const,
+      reason: "suggestions have not been computed yet",
+    };
+  }
+
+  // layer_score = 0 at REACH_DECAY_SECONDS[profile], 1 at 0s; GREATEST clamps
+  // a walk past the decay window rather than letting it go negative. A
+  // missing row never gets joined, which is the "no pharmacy within reach"
+  // signal falling out of the LEFT-JOIN-shaped absence for free (the join
+  // below is an inner join for exactly this reason — a row that never
+  // matches contributes 0 by not existing, same result, one fewer NULL to
+  // coalesce).
+  // The decay is looked up per profile, not a shared constant (T-017): at
+  // 4.2 m/s a 900s decay puts a bike score's zero point at 3.8km, which
+  // covers almost all of inner Berlin and compresses every score to ~1. 300s
+  // is what keeps bike selective (see layers.ts).
+  // totalWeight is constant across every row this query returns, so it is a
+  // bind parameter computed once in JS rather than recomputed per cell.
+  const decaySeconds = REACH_DECAY_SECONDS[profile as ReachProfile];
+  const r = await pool.query(
+    `WITH weights(layer, w) AS (
+       SELECT unnest($1::text[]), unnest($2::int[])
+     ),
+     -- T-019: reachability gates, density ranks. reach is the old term; the
+     -- density factor is DENSITY_FLOOR plus the rest earned by how many places
+     -- of that layer are nearby, log-scaled against the layer's own "plenty"
+     -- (DENSITY_PLENTY, the measured p90 — dining's 185 is 17x school's 11, so a
+     -- shared scale would make every score a dining score).
+     --
+     -- COALESCE(nearby, plenty) so a field whose density has not been backfilled
+     -- yet scores exactly as it did before this change, rather than collapsing to
+     -- the floor. log-scaled because the difference between 1 and 10 restaurants
+     -- matters and the difference between 300 and 310 does not.
+     plenty(layer, p) AS (
+       SELECT unnest($7::text[]), unnest($8::int[])
+     ),
+     scored AS (
+       SELECT r.cell_id,
+              -- float8 throughout, not numeric. Postgres's numeric ln() is
+              -- arbitrary-precision and measured 30x slower than the float8 one
+              -- (2.12s vs 0.07s over 500k rows), which alone took a cold scoring
+              -- query from ~1.0s to ~3.5s and would have tripled the startup warm
+              -- pass. Nothing here needs exact decimal arithmetic — the result is
+              -- rounded to 4 places and used to sort.
+              (SUM(
+                 wt.w
+                 * GREATEST(0, 1 - r.seconds::float8 / $3::float8)
+                 * ($9::float8 + (1 - $9::float8) * LEAST(1::float8,
+                     ln(1 + COALESCE(r.nearby, pl.p)::float8) / ln(1 + pl.p::float8)))
+               ) / $4)::double precision AS score,
+              jsonb_object_agg(r.layer, r.seconds) AS layers,
+              jsonb_object_agg(r.layer, COALESCE(r.nearby, 0)) AS nearby
+         FROM ${DEFAULT_SCHEMA}.reach r
+         JOIN weights wt ON wt.layer = r.layer
+         JOIN plenty pl ON pl.layer = r.layer
+        WHERE r.profile = $5
+        GROUP BY r.cell_id
+     ),
+     -- Best-scoring cell per ~700m coarse cell (REACH_SPREAD_DEGREES) — a
+     -- cheap pre-filter only. It bounds candidates per grid cell, not the gap
+     -- between cells, so the real 700m spread is enforced afterwards in JS
+     -- (see REACH_SPREAD_METERS above); this over-fetches past the eventual
+     -- 10 so that greedy thinning still has enough candidates left to pick
+     -- 10 mutually-distant ones from.
+     spread AS (
+       SELECT DISTINCT ON (ST_SnapToGrid(c.geom, $6))
+              c.id AS cell_id, c.geom, s.score, s.layers, s.nearby
+         FROM scored s
+         JOIN ${DEFAULT_SCHEMA}.reach_cells c ON c.id = s.cell_id
+        -- Score ties are broken deterministically, but deliberately NOT by
+        -- coordinate. A single-layer weight vector (reachable from the
+        -- questionnaire: groceries:1 and every other answer at zero) puts every
+        -- cell collocated with a shop at exactly 1.0 — 37 of them for groceries
+        -- in Berlin — and an unordered tie means the same question can answer
+        -- differently after a restart, with the cache then freezing whichever
+        -- order that run happened to produce.
+        --
+        -- Ordering those ties by latitude, which is what this did first, turned
+        -- out worse than non-determinism. Measured against the complete field:
+        -- bike / groceries:3,health:2,dining:1 has 230 cells at exactly 1.0,
+        -- spanning 52.3866–52.6350 — the full 27km of the city — and lat-order
+        -- returned the southernmost ten, a 5.7km band on the city limit. Mitte
+        -- and Prenzlauer Berg scored identically and were never shown. Any
+        -- saturated query pointed at the same edge of the map.
+        --
+        -- md5 of the cell id is stable across restarts and cache warms, which
+        -- is all the coordinate sort was actually buying, and it samples the
+        -- tied set uniformly instead of sorting it geographically.
+        ORDER BY ST_SnapToGrid(c.geom, $6), s.score DESC, md5(c.id::text)
+     )
+     SELECT ROUND(ST_Y(geom)::numeric, 6)::double precision AS lat,
+            ROUND(ST_X(geom)::numeric, 6)::double precision AS lon,
+            ROUND(score::numeric, 4)::double precision AS score,
+            layers,
+            nearby
+       FROM spread
+      ORDER BY score DESC, md5(cell_id::text)
+      LIMIT 200`,
+    [
+      layers,
+      weights,
+      decaySeconds,
+      totalWeight,
+      profile,
+      REACH_SPREAD_DEGREES,
+      layers,
+      layers.map((l) => DENSITY_PLENTY[l as keyof typeof REACH_LAYERS]),
+      DENSITY_FLOOR,
+    ]
+  );
+
+  // Greedy by score: r.rows is already ordered descending, so the first
+  // accepted cell is always the best-scoring one, and every later accept is
+  // the best-scoring cell that doesn't crowd an earlier pick.
+  const picked: {
+    lat: number;
+    lon: number;
+    score: number;
+    layers: Record<string, number>;
+    nearby: Record<string, number>;
+  }[] = [];
+  for (const row of r.rows) {
+    const tooClose = picked.some(
+      (p) => haversineM(p.lat, p.lon, row.lat, row.lon) < REACH_SPREAD_METERS
+    );
+    if (tooClose) continue;
+    picked.push(row);
+    if (picked.length === 10) break;
+  }
+
+  const body = {
+    available: true as const,
+    cells: picked.map((row) => ({
+      lat: row.lat,
+      lon: row.lon,
+      score: row.score,
+      // Seconds per requested layer; a layer absent here is a layer this cell
+      // cannot reach within REACH_CAP_SECONDS[profile], which is the point the
+      // whole feature is built to make ("no pharmacy in 30 min").
+      layers: row.layers,
+      // How many places of each layer are within the profile's density radius —
+      // the half of the score reachability cannot see (T-019). This is what
+      // separates a cell with 308 restaurants from one with 32 when both are
+      // standing on top of one.
+      nearby: row.nearby,
+    })),
+  };
+  // Long TTL: the field only changes on reimport/reload, which the version
+  // prefix above already accounts for — this is not the /api/amenities case
+  // where an expiry is doing real work.
+  await cacheSet(
+    suggestCacheKey(profile, entries),
+    JSON.stringify(body),
+    60 * 60 * 24 * 7
+  );
+  return body;
+};
+
+// --- naming suggestion results (T-016 follow-up) ----------------------------
+//
+// "#1 100% match" tells a Berliner nothing; "Lausitzer Platz, Kreuzberg" tells
+// them everything. zoom=16, not the zoom=12 reverseGeocode uses for imported
+// areas: at 12 every cell in the city reverses to "Berlin" and ten results
+// share one label. 16 returns road + suburb, which is the granularity that
+// distinguishes them.
+//
+// The work is bounded and small. The questionnaire's answer space is closed
+// (648 combinations) and only 275 distinct cells appear across all of them, so
+// this asks Nominatim 275 questions once, at its 1 req/s limit — about five
+// minutes, then never again.
+const placeNameLabel = (address: Record<string, string> | undefined) => {
+  if (!address) return null;
+  // road is usually the recognisable half ("Lausitzer Platz"), suburb the
+  // orienting half ("Kreuzberg"). quarter is the fallback for a cell that
+  // snapped between named roads; borough for the outer districts where
+  // Nominatim returns no suburb.
+  const near = address.road ?? address.quarter ?? address.neighbourhood ?? null;
+  const area = address.suburb ?? address.borough ?? address.city ?? null;
+  if (near && area && near !== area) return `${near}, ${area}`.slice(0, 80);
+  return (near ?? area)?.slice(0, 80) ?? null;
+};
+
+const fetchPlaceName = async (lat: number, lon: number) => {
+  await geocodeSlot();
+  try {
+    const r = await fetch(
+      `${NOMINATIM_REVERSE_URL}?format=jsonv2&zoom=16&lat=${lat}&lon=${lon}`,
+      { headers: { "User-Agent": USER_AGENT }, signal: AbortSignal.timeout(10_000) }
+    );
+    if (!r.ok) return undefined; // transient — no row written, so it retries
+    return placeNameLabel(((await r.json()) as any)?.address);
+  } catch {
+    return undefined;
+  }
+};
+
+// In-flight guard: ten results arriving on every poll would otherwise queue the
+// same lookup repeatedly behind the 1 req/s gate and starve the fresh ones.
+const namingInFlight = new Set<string>();
+
+const fillPlaceNames = async (cells: { lat: number; lon: number }[]) => {
+  for (const { lat, lon } of cells) {
+    const k = `${lat.toFixed(4)},${lon.toFixed(4)}`;
+    if (namingInFlight.has(k)) continue;
+    namingInFlight.add(k);
+    try {
+      const name = await fetchPlaceName(lat, lon);
+      if (name === undefined) continue; // fetch failed; leave it unnamed
+      await pool.query(
+        `INSERT INTO public.place_names (lat, lon, name) VALUES ($1, $2, $3)
+         ON CONFLICT (lat, lon) DO UPDATE SET name = EXCLUDED.name, looked_up_at = now()`,
+        [lat.toFixed(4), lon.toFixed(4), name]
+      );
+    } catch (err) {
+      console.error(`⚠️ naming ${k} failed:`, (err as Error).message);
+    } finally {
+      namingInFlight.delete(k);
+    }
+  }
+};
+
+// Decorates on the way OUT of the cache, not on the way in. The scored answer is
+// cached for 7 days; names arrive minutes later and would otherwise be frozen as
+// null until the cache expired.
+const withPlaceNames = async (body: any) => {
+  if (!body?.cells?.length) return body;
+  const r = await pool.query<{ lat: string; lon: string; name: string | null }>(
+    `SELECT lat::text, lon::text, name FROM public.place_names
+      WHERE (lat, lon) IN (${body.cells
+        .map((_: unknown, i: number) => `($${i * 2 + 1}::numeric, $${i * 2 + 2}::numeric)`)
+        .join(",")})`,
+    body.cells.flatMap((c: any) => [c.lat.toFixed(4), c.lon.toFixed(4)])
+  );
+  const byKey = new Map(
+    r.rows.map((row) => [`${(+row.lat).toFixed(4)},${(+row.lon).toFixed(4)}`, row.name])
+  );
+  const missing: { lat: number; lon: number }[] = [];
+  const cells = body.cells.map((c: any) => {
+    const k = `${c.lat.toFixed(4)},${c.lon.toFixed(4)}`;
+    if (!byKey.has(k)) missing.push({ lat: c.lat, lon: c.lon });
+    return { ...c, name: byKey.get(k) ?? null };
+  });
+  // Deliberately not awaited: a first-time answer returns coordinates now and
+  // gains names on the next request, rather than blocking the response behind a
+  // 1 req/s external service.
+  if (missing.length) void fillPlaceNames(missing);
+  return { ...body, cells };
+};
+
+app.get("/api/suggest", async (req: any, res: any) => {
+  const profile = String(req.query.profile ?? "walk");
+  // REACH_PROFILES, not all of PROFILES: stroller and bike have no
+  // precomputed reach field (layers.ts explains why).
+  if (!(REACH_PROFILES as readonly string[]).includes(profile)) {
+    return res
+      .status(400)
+      .json({ error: `Unknown profile. Try: ${REACH_PROFILES.join(", ")}` });
+  }
+
+  const rawWeights: Record<string, number> = {};
+  const raw = String(req.query.w ?? "").trim();
+  for (const token of raw.split(",").map((t) => t.trim()).filter(Boolean)) {
+    const [layer, wStr] = token.split(":");
+    if (!layer || !Object.prototype.hasOwnProperty.call(REACH_LAYERS, layer)) {
+      return res.status(400).json({
+        error: `Unknown layer in "${token}". Try: ${Object.keys(REACH_LAYERS).join(", ")}`,
+      });
+    }
+    if (!wStr || !/^\d+$/.test(wStr) || parseInt(wStr, 10) > REACH_MAX_WEIGHT) {
+      return res.status(400).json({
+        error: `Weight in "${token}" must be an integer 0..${REACH_MAX_WEIGHT}`,
+      });
+    }
+    // Last one wins on a repeated layer rather than double-joining it below
+    // and silently doubling its weight.
+    rawWeights[layer] = parseInt(wStr, 10);
+  }
+
+  const entries = normalizeWeights(rawWeights);
+  if (!entries.length) {
+    return res.status(400).json({
+      error: "Need at least one layer with a non-zero weight, e.g. w=groceries:3",
+    });
+  }
+
+  // No `limit` param: it would multiply the 648-answer cache space by however
+  // many values callers invent, for no user-visible gain. Fixed at 10 inside
+  // scoreSuggestions.
+  const key = suggestCacheKey(profile, entries);
+  const cached = await cacheGet(key);
+  if (cached) {
+    cacheHits++;
+    return res.json(await withPlaceNames(JSON.parse(cached as string)));
+  }
+  cacheMisses++;
+
+  try {
+    res.json(await withPlaceNames(await scoreSuggestions(profile, entries)));
+  } catch (err) {
+    console.error("❌ suggest error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 app.get("/api/isochrone", async (req: any, res: any) => {
   const start = Date.now();
   const { lat, lon, minutes } = req.query;
@@ -1349,7 +2020,10 @@ app.get("/api/isochrone", async (req: any, res: any) => {
   // coordinates snap to a different vertex id in a different schema.
   const { schema, matched } = await resolveSchema(latNum, lonNum);
 
-  const vertexKey = `vertex:${schema}:${latNum.toFixed(5)},${lonNum.toFixed(5)}`;
+  // Profile is part of the key because the snap below is now profile-dependent:
+  // the same click resolves to different vertices for walk and bike, and a
+  // shared key would serve one profile's answer to the other.
+  const vertexKey = `vertex2:${schema}:${profile}:${latNum.toFixed(5)},${lonNum.toFixed(5)}`;
   let vertexIdStr = await cacheGet(vertexKey);
   let vertexId: number;
 
@@ -1362,10 +2036,30 @@ app.get("/api/isochrone", async (req: any, res: any) => {
     // main_component only: the geometrically nearest vertex is often on a
     // disconnected fragment (5.7% of Berlin's vertices), which routes nowhere.
     // Populated by scripts/main_component.sql.
+    //
+    // main_component is necessary but NOT sufficient, because it is computed on
+    // the profile-blind graph while costExpr removes edges per profile. A vertex
+    // whose only edges are cycleway (tag_id 113) is well connected in general and
+    // completely isolated on foot, so the traversal reaches nothing and the
+    // endpoint returns 200 with zero bands — indistinguishable from "nowhere to
+    // go" and impossible to act on. Measured on Berlin: 14,926 of 618,345
+    // main_component vertices are stranded on foot (2.4%) and 36,796 for
+    // wheelchair (6.0%). Reported case: 52.546,13.36 in Wedding snapped to
+    // vertex 585731, 22m away, both of whose edges are cycleway.
+    //
+    // So require at least one edge this profile can actually use. The KNN scan
+    // stops at the first vertex that passes, which for most clicks is still the
+    // nearest one; idx_berlin_v2_source/target make the check cheap.
     const vertexRes = await pool.query(
-      `SELECT id, ST_Distance(geom::geography, ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography) AS dist_m
-       FROM ${schema}.ways_vertices_pgr WHERE main_component
-       ORDER BY geom <-> ST_SetSRID(ST_MakePoint($1, $2), 4326) LIMIT 1`,
+      `SELECT v.id, ST_Distance(v.geom::geography, ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography) AS dist_m
+       FROM ${schema}.ways_vertices_pgr v
+       WHERE v.main_component
+         AND EXISTS (
+           SELECT 1 FROM ${schema}.ways w
+            WHERE (w.source = v.id OR w.target = v.id)
+              AND (${costExpr(profile as ProfileName)}) > 0
+         )
+       ORDER BY v.geom <-> ST_SetSRID(ST_MakePoint($1, $2), 4326) LIMIT 1`,
       [lonNum, latNum]
     );
     const row = vertexRes.rows[0];
@@ -1427,7 +2121,13 @@ app.get("/api/isochrone", async (req: any, res: any) => {
       6
     )}, ${latNum.toFixed(6)}), 4326), ` +
     `${dLon.toFixed(6)}, ${dLat.toFixed(6)})`;
-  const redisKey = `net:${schema}:${latNum.toFixed(5)},${lonNum.toFixed(
+  // net2: bumped when the vertex snap became profile-aware. Every answer cached
+  // under net: for a click that had snapped to a profile-stranded vertex is an
+  // empty FeatureCollection, and those are exactly the ones the fix repairs —
+  // leaving the prefix alone would have served the bug for another 24 hours.
+  // Same precedent as poi2 and suggest3: bump whenever the computation behind
+  // the value changes, not just its shape.
+  const redisKey = `net2:${schema}:${latNum.toFixed(5)},${lonNum.toFixed(
     5
   )}:${duration}:${profile}`;
 
@@ -1510,8 +2210,182 @@ if (fs.existsSync(uiDist)) {
   console.log(`📦 Serving UI from ${uiDist}`);
 }
 
+// --- suggestion cache warm pass (T-016, extended T-017) ---------------------
+// The questionnaire (isochrone-ui/MapView.tsx) is six fixed-choice questions
+// with 4 x 3 x 2 x 3 x 3 x 3 = 648 possible answers, so the whole answer space
+// is enumerable — kept here as a literal table rather than imported from the
+// UI, since the two only have to agree on the *answer space*, not on copy or
+// option order. A slider-based questionnaire would make this key space
+// unbounded, which is a second, independent reason (besides ADR-0014's
+// geocode rate gate) the questionnaire stays fixed-choice rather than
+// continuous.
+//
+// T-017 grew this from 324: "Who's moving?" gained a fourth option ("with a
+// dog", below) and mobility gained cycling (REACH_PROFILES growing to 3 in
+// layers.ts already does that half for free).
+//
+// The dog option is not a new layer — it sets greenspace to weight 3. The
+// green space question can also set greenspace, independently, so the two
+// answers are merged by MAX below, not last-write — mirrors
+// buildSuggestWeights in isochrone-ui/src/MapView.tsx, which merges the same
+// way for the same reason: household=dog + greenspace="not much" must still
+// warm `greenspace:3`, because that's the w= string the UI actually sends
+// (max(3, 0)), not `greenspace:0`. Object spread here would drop the dog's
+// ask whenever the green space question's answer landed later in the merge
+// order, warming a key no real request constructs. See T-017 ticket for why
+// dog_park/vet/pet POIs are too sparse to carry their own layer.
+//
+// This is a mirrored rule, not a shared function: the UI bundle deliberately
+// does not import backend modules (it keeps its own literal ReachLayer
+// union for the same reason), so buildSuggestWeights and the merge below
+// must be kept in agreement by hand. T-012 is the scar from exactly this
+// kind of pair drifting silently — if you change one, change the other.
+const Q_MOVING = [
+  {},
+  { kindergarten: 3, playground: 2 },
+  { school: 3, playground: 2 },
+  { greenspace: 3 }, // "with a dog"
+] as const;
+const Q_MOBILITY = REACH_PROFILES;
+const Q_GROCERIES = [{ groceries: 3 }, { groceries: 1 }] as const;
+const Q_HEALTH = [{ health: 3 }, { health: 1 }, { health: 0 }] as const;
+const Q_GREENSPACE = [{ greenspace: 3 }, { greenspace: 1 }, { greenspace: 0 }] as const;
+const Q_DINING = [{ dining: 3 }, { dining: 1 }, { dining: 0 }] as const;
+
+// Mirrors buildSuggestWeights' merge in MapView.tsx (comment above explains
+// why it's mirrored rather than shared): the higher ask always wins when two
+// questions write the same layer, rather than whichever was spread last.
+const mergeWeightsMax = (
+  ...parts: readonly Partial<Record<string, number>>[]
+): Record<string, number> => {
+  const w: Record<string, number> = {};
+  for (const part of parts) {
+    for (const [k, v] of Object.entries(part)) w[k] = Math.max(w[k] ?? 0, v ?? 0);
+  }
+  return w;
+};
+
+const WARM_ANSWERS: { profile: string; weights: Record<string, number> }[] = [];
+for (const moving of Q_MOVING) {
+  for (const profile of Q_MOBILITY) {
+    for (const groceries of Q_GROCERIES) {
+      for (const health of Q_HEALTH) {
+        for (const greenspace of Q_GREENSPACE) {
+          for (const dining of Q_DINING) {
+            WARM_ANSWERS.push({
+              profile,
+              weights: mergeWeightsMax(moving, groceries, health, greenspace, dining),
+            });
+          }
+        }
+      }
+    }
+  }
+}
+
+// Guards against overlap with itself, not with drainQueue/sweepPois — nothing
+// else calls scoreSuggestions in a loop. Serial and awaited on purpose: this
+// is a 2-vCPU box, and 648 concurrent aggregates would compete for exactly
+// the postgres connections real traffic needs.
+let warmingInFlight = false;
+const warmSuggestCache = async () => {
+  if (warmingInFlight) return;
+  warmingInFlight = true;
+  try {
+    let hasRows = false;
+    try {
+      const has = await pool.query(
+        `SELECT EXISTS (SELECT 1 FROM ${DEFAULT_SCHEMA}.reach LIMIT 1) AS has_rows`
+      );
+      hasRows = has.rows[0].has_rows;
+    } catch (err) {
+      if ((err as any).code !== "42P01") throw err;
+    }
+    if (!hasRows) {
+      console.log(
+        `ℹ️ ${DEFAULT_SCHEMA}.reach is empty; skipping the suggestion cache warm pass`
+      );
+      // ponytail: one-shot at startup, no periodic recheck. The precompute is
+      // an offline artifact loaded once, and the process restarts after it
+      // lands (same deploy step as any other schema change) — add a recheck
+      // loop only if that assumption stops holding.
+      return;
+    }
+    const start = Date.now();
+    console.log(`🔥 warming ${WARM_ANSWERS.length} suggestion answer sets...`);
+    // Every cell the questionnaire can ever surface, collected as a side effect
+    // of warming rather than by a second sweep: 275 of them across all 648
+    // answers, which is the whole naming budget (see fillPlaceNames).
+    const everShown = new Map<string, { lat: number; lon: number }>();
+    // Different answers collapse onto the same cache key — "not really" and
+    // "not much" both drop their layer, and mergeWeightsMax folds overlapping
+    // household/greenspace picks together. 648 answers, 501 distinct keys, so a
+    // naive loop spent 23% of the pass recomputing scores it had already cached.
+    // Cheap to skip now that each query is a full scan of the reach field.
+    const warmed = new Set<string>();
+    for (const answer of WARM_ANSWERS) {
+      const entries = normalizeWeights(answer.weights);
+      if (!entries.length) continue; // no combination above produces this; kept defensive
+      const key = suggestCacheKey(answer.profile, entries);
+      if (warmed.has(key)) continue;
+      warmed.add(key);
+      try {
+        const body = await scoreSuggestions(answer.profile, entries);
+        for (const c of (body as any).cells ?? [])
+          everShown.set(`${c.lat.toFixed(4)},${c.lon.toFixed(4)}`, { lat: c.lat, lon: c.lon });
+      } catch (err) {
+        console.error(
+          `⚠️ suggest warm pass: ${suggestCacheKey(answer.profile, entries)} failed:`,
+          (err as Error).message
+        );
+      }
+    }
+    console.log(
+      `🔥 suggest warm pass done: ${warmed.size} distinct keys from ${
+        WARM_ANSWERS.length
+      } answer sets in ${Date.now() - start}ms`
+    );
+
+    // Guard the empty case: if every answer failed, `VALUES ` below has nothing
+    // to interpolate and Postgres reports `syntax error at or near ")"` — which
+    // is what a missing reach.nearby column looked like from three layers away.
+    // An empty set here means the warm pass produced nothing, which the errors
+    // above have already said.
+    if (!everShown.size) return;
+
+    // Not awaited: this is ~275 requests at Nominatim's 1 req/s, so about five
+    // minutes. Startup must not wait for it, and results are useful unnamed.
+    const unnamed = await pool.query<{ lat: string; lon: string }>(
+      `SELECT v.lat::text, v.lon::text
+         FROM (VALUES ${[...everShown.values()]
+           .map((_, i) => `($${i * 2 + 1}::numeric, $${i * 2 + 2}::numeric)`)
+           .join(",")}) AS v(lat, lon)
+         LEFT JOIN public.place_names p ON p.lat = v.lat AND p.lon = v.lon
+        WHERE p.lat IS NULL`,
+      [...everShown.values()].flatMap((c) => [c.lat.toFixed(4), c.lon.toFixed(4)])
+    );
+    if (unnamed.rowCount) {
+      console.log(
+        `🏷️ naming ${unnamed.rowCount} of ${everShown.size} result places (~${Math.ceil(
+          unnamed.rowCount / 60
+        )} min at 1 req/s)`
+      );
+      void fillPlaceNames(
+        unnamed.rows.map((r) => ({ lat: +r.lat, lon: +r.lon }))
+      ).then(() => console.log(`🏷️ place naming complete`));
+    }
+  } finally {
+    warmingInFlight = false;
+  }
+};
+
 ensureAreasTable()
+  .then(backfillCoverage)
+  // Before the warm pass, not after: warming caches scored answers, and warming
+  // against NULL density would freeze 648 pre-density answers for 7 days.
+  .then(backfillNearby)
   .then(drainQueue)
+  .then(warmSuggestCache)
   .catch((err) =>
     console.error("⚠️ could not ensure areas table:", (err as Error).message)
   );
