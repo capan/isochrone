@@ -28,6 +28,19 @@ const PROFILE_ICONS: Record<string, string> = {
   bike: "🚲",
 };
 
+// How to say "a trip of N minutes" for each profile. The click popup hardcoded
+// "walk" and kept saying it with bike selected — reported against a screenshot
+// reading "10 min walk" beneath a lit-up bike pill, with the minutes and the
+// counts already correct. One verb cannot cover all four without being wrong
+// ("walk" for bike) or presumptuous ("roll" for wheelchair), so each gets its
+// own phrase.
+const PROFILE_TRIP: Record<string, string> = {
+  walk: "on foot",
+  stroller: "with a stroller",
+  wheelchair: "by wheelchair",
+  bike: "by bike",
+};
+
 // Sequential single-hue ramp, light→dark = near→far. Starts at step 250, the
 // lightest that still clears contrast against the basemap.
 const RAMP = [
@@ -464,6 +477,16 @@ export default function MapView() {
 
   // the only two things worth re-rendering for; the map itself stays imperative
   const [offer, setOffer] = useState<{ lat: number; lon: number } | null>(null);
+  // T-031: non-null exactly when a click produced isochrone bands — drives
+  // both the ramp legend's visibility and the map popup summary below. Reset
+  // to null on every failure path (offer, error, empty) alongside the
+  // isochrone layer itself, so the two never disagree about "did this work".
+  const [clickSummary, setClickSummary] = useState<{ lat: number; lon: number } | null>(
+    null
+  );
+  // Right rail defaults open; the toggle just gets it out of the way, it
+  // never affects whether Discover has been used (suggestState still owns that).
+  const [railOpen, setRailOpen] = useState(true);
   // id → status text. A map, not a single value: the server queues imports, so
   // the UI must let you start a second one while the first is still running.
   const [jobs, setJobs] = useState<Record<number, string>>({});
@@ -570,6 +593,21 @@ export default function MapView() {
   // heatLayerRef, same split as isochroneRef/shownMinutes above.
   const [heatAvailable, setHeatAvailable] = useState(false);
 
+  // T-031: one shared "something is loading" signal for the thin bar at the
+  // top of the map (see .loading-bar below), covering the five requests that
+  // previously gave no feedback at all. A counter, not a boolean — two of
+  // these fire in parallel by design (/api/suggest and /api/suggest-grid on
+  // every questionnaire answer; a map click firing the isochrone then
+  // /api/amenities), and a boolean would flip off while the other was still
+  // in flight. Every increment is paired with a decrement in a `finally`, so
+  // an early return, an aborted request and a thrown error all still release
+  // it — see the five call sites below. No ref needed alongside the state:
+  // every reader here only ever bumps the counter with a functional update,
+  // never reads its current value synchronously.
+  const [loadingCount, setLoadingCount] = useState(0);
+  const beginLoading = () => setLoadingCount((c) => c + 1);
+  const endLoading = () => setLoadingCount((c) => Math.max(0, c - 1));
+
   const closeHelp = () => {
     setHelp(false);
     setHelpFocus(undefined);
@@ -620,6 +658,10 @@ export default function MapView() {
     // topleft, not topright: the profile picker owns the top-right corner, and
     // Leaflet only auto-spaces controls that live in the same corner stack.
     L.control.layers(named, undefined, { position: "topleft" }).addTo(map);
+    // T-031: the right rail is a tall fixed panel pinned to the right edge,
+    // which would sit directly on top of Leaflet's default bottom-right
+    // attribution. Move attribution to the one corner nothing else claims.
+    map.attributionControl.setPosition("bottomleft");
 
     map.on("baselayerchange", (e: L.LayersControlEvent) => {
       const key = (Object.keys(BASEMAPS) as BasemapKey[]).find(
@@ -761,21 +803,38 @@ export default function MapView() {
       }
     };
 
-    // Suggestion markers: styled entirely through circleMarker options (no
-    // CSS class), so "best clearly distinguished" holds regardless of
-    // stylesheet — rank 1 is bigger and amber, the rest are smaller and blue.
+    // Suggestion markers carry their rank. The panel lists them 1..10 and the
+    // map drew ten identical dots, so matching a result to its pin meant
+    // hovering each one — reported with a screenshot of the plain blue dots.
+    // divIcon rather than circleMarker because a circle cannot hold text; the
+    // styling stays inline for the reason the circles did, so "best clearly
+    // distinguished" survives regardless of the stylesheet — rank 1 is bigger
+    // and amber, the rest smaller and blue. The only interpolated value is the
+    // loop index, which is ours; the area's name stays a text node in the
+    // tooltip below, because Nominatim's text is not ours to render as markup.
     suggestLayerRef.current = L.layerGroup().addTo(map);
     drawSuggestRef.current = (cells: SuggestCell[]) => {
       const g = suggestLayerRef.current;
       if (!g) return;
       g.clearLayers();
       cells.forEach((c, i) => {
-        L.circleMarker([c.lat, c.lon], {
-          radius: i === 0 ? 12 : 8,
-          weight: 2,
-          color: "#fff",
-          fillColor: i === 0 ? "#ffb703" : "#3a86ff",
-          fillOpacity: 0.92,
+        const best = i === 0;
+        const d = best ? 26 : 21;
+        L.marker([c.lat, c.lon], {
+          icon: L.divIcon({
+            // Empty, not omitted: Leaflet's default divIcon class paints a
+            // white box behind the pin.
+            className: "",
+            iconSize: [d, d],
+            iconAnchor: [d / 2, d / 2],
+            html:
+              `<div style="width:${d}px;height:${d}px;border-radius:50%;` +
+              `background:${best ? "#ffb703" : "#3a86ff"};` +
+              `border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,.35);` +
+              `color:#fff;font:700 ${best ? 13 : 11}px system-ui;` +
+              `display:flex;align-items:center;justify-content:center;` +
+              `box-sizing:border-box;">${i + 1}</div>`,
+          }),
         })
           // The name, not the score: "100% match" on ten pins is noise, and the
           // pin's own position already says where it is. DOM node rather than a
@@ -977,6 +1036,16 @@ export default function MapView() {
       // once the data is actually in hand.
       const gen = ++drawGenRef.current;
 
+      // This function owns lastClickRef. It used to be stamped by each caller
+      // instead — the map click, the deep link, the search result — and
+      // focusSuggestion, which calls straight in here, was the one that never
+      // did. So after clicking a ranked suggestion the profile picker's redraw
+      // had either a stale coordinate or none at all, and switching walk→bike
+      // did nothing whatsoever. Reported from the edge-split branch. Setting it
+      // where every path already converges is also what makes the comment in
+      // focusSuggestion true rather than aspirational.
+      lastClickRef.current = [lat, lng];
+
       // pin the origin — the lightest band alone doesn't read as "you are
       // here". circleMarker, not marker: default icon PNGs don't survive vite.
       if (markerRef.current) {
@@ -998,72 +1067,89 @@ export default function MapView() {
       );
       setShownMinutes(minutes);
 
+      // T-031: the primary interaction (click → bands) had no loading signal
+      // at all. beginLoading/endLoading wrap the whole request-to-draw span,
+      // not just the fetch, so the bar stays up through layer building too.
+      // The `finally` is what makes the decrement unconditional across every
+      // exit this function has: the stale-gen returns below (both inside the
+      // try and inside the catch), the outside-coverage/error return, a
+      // thrown error, and the ordinary path all funnel through it.
+      beginLoading();
       try {
-        const res = await fetch(
-          `/api/isochrone?lat=${lat}&lon=${lng}&minutes=${minutes}` +
-            `&profile=${profileRef.current}`
-        );
-        const data = await res.json();
-        if (gen !== drawGenRef.current) return; // a newer click already won
-
-        if (!res.ok) {
-          // Outside coverage is now an offer, not a dead end.
-          if (data.error === "outside coverage") {
-            setOffer({ lat, lon: lng });
-          } else {
-            showToast(data.detail ?? data.error ?? `Request failed (${res.status})`);
-          }
-          clearIsochrone();
-          return;
-        }
-
-        setOffer(null);
-
-        // farthest band first, so nearer streets draw on top at junctions
-        const features = [...data.geojson.features].sort(
-          (a, b) => b.properties.band - a.properties.band
-        );
-
-        for (const feature of features) {
-          const band: number = feature.properties.band;
-          const until = (data.minutes / data.bands) * band;
-
-          const layer = L.geoJSON(feature, {
-            style: {
-              color: BASEMAPS[basemapRef.current].ramp[band - 1],
-              weight: 2,
-              opacity: 0.9,
-            },
-          })
-            // identity never rests on color alone
-            .bindTooltip(`≤ ${until.toFixed(1)} min`, { sticky: true });
-
-          layers.push(layer);
-        }
-
-        if (!features.length) {
-          // Do not guess at the cause. This fires on a 200 with no bands, which
-          // means the click DID snap to a routable vertex — the server's 400
-          // covers the "no street nearby" case with an exact distance. So the
-          // spot is on the network and simply cannot reach anything in the time
-          // budget: measured on vertex 70954, whose only edge is a 1,764m path,
-          // 21 minutes on foot and therefore empty at 15. The old copy blamed
-          // "stairs or rough surfaces", which is wrong for walk in particular —
-          // stairs are passable there at half speed (PROFILES in layers.ts).
-          showToast(
-            `Nothing reachable within ${data.minutes} min from here on "${profileRef.current}". Try more minutes, or another profile.`
+        try {
+          const res = await fetch(
+            `/api/isochrone?lat=${lat}&lon=${lng}&minutes=${minutes}` +
+              `&profile=${profileRef.current}`
           );
-        }
-      } catch (err) {
-        if (gen !== drawGenRef.current) return;
-        console.error("Isochrone network fetch failed", err);
-        showToast("Could not reach the isochrone service. Try again in a moment.");
-      }
+          const data = await res.json();
+          if (gen !== drawGenRef.current) return; // a newer click already won
 
-      if (gen !== drawGenRef.current) return;
-      clearIsochrone();
-      isochroneRef.current = L.layerGroup(layers).addTo(map);
-      if (layers.length) loadPlacesRef.current(lat, lng);
+          if (!res.ok) {
+            // Outside coverage is now an offer, not a dead end.
+            if (data.error === "outside coverage") {
+              setOffer({ lat, lon: lng });
+            } else {
+              showToast(data.detail ?? data.error ?? `Request failed (${res.status})`);
+            }
+            clearIsochrone();
+            setClickSummary(null);
+            return;
+          }
+
+          setOffer(null);
+
+          // farthest band first, so nearer streets draw on top at junctions
+          const features = [...data.geojson.features].sort(
+            (a, b) => b.properties.band - a.properties.band
+          );
+
+          for (const feature of features) {
+            const band: number = feature.properties.band;
+            const until = (data.minutes / data.bands) * band;
+
+            const layer = L.geoJSON(feature, {
+              style: {
+                color: BASEMAPS[basemapRef.current].ramp[band - 1],
+                weight: 2,
+                opacity: 0.9,
+              },
+            })
+              // identity never rests on color alone
+              .bindTooltip(`≤ ${until.toFixed(1)} min`, { sticky: true });
+
+            layers.push(layer);
+          }
+
+          if (!features.length) {
+            // Do not guess at the cause. This fires on a 200 with no bands, which
+            // means the click DID snap to a routable vertex — the server's 400
+            // covers the "no street nearby" case with an exact distance. So the
+            // spot is on the network and simply cannot reach anything in the time
+            // budget: measured on vertex 70954, whose only edge is a 1,764m path,
+            // 21 minutes on foot and therefore empty at 15. The old copy blamed
+            // "stairs or rough surfaces", which is wrong for walk in particular —
+            // stairs are passable there at half speed (PROFILES in layers.ts).
+            showToast(
+              `Nothing reachable within ${data.minutes} min from here on "${profileRef.current}". Try more minutes, or another profile.`
+            );
+          }
+        } catch (err) {
+          if (gen !== drawGenRef.current) return;
+          console.error("Isochrone network fetch failed", err);
+          showToast("Could not reach the isochrone service. Try again in a moment.");
+          setClickSummary(null);
+        }
+
+        if (gen !== drawGenRef.current) return;
+        clearIsochrone();
+        isochroneRef.current = L.layerGroup(layers).addTo(map);
+        // Bands drawn (not just a 200): the "nothing reachable" case above still
+        // clears the layer to empty, and the popup has nothing worth summarising.
+        setClickSummary(layers.length ? { lat, lon: lng } : null);
+        if (layers.length) loadPlacesRef.current(lat, lng);
+      } finally {
+        endLoading();
+      }
     };
     updateRef.current = updateIsochrones;
 
@@ -1076,7 +1162,6 @@ export default function MapView() {
     const debouncedUpdate = debounce((lat: number, lng: number) => {
       const snappedLat = parseFloat(snap(lat).toFixed(5));
       const snappedLng = parseFloat(snap(lng).toFixed(5));
-      lastClickRef.current = [snappedLat, snappedLng];
       updateIsochrones(snappedLat, snappedLng);
     }, 600);
 
@@ -1095,7 +1180,6 @@ export default function MapView() {
 
     if (!isNaN(urlLat) && !isNaN(urlLon)) {
       map.setView([urlLat, urlLon], 14);
-      lastClickRef.current = [urlLat, urlLon];
       updateIsochrones(urlLat, urlLon);
     }
 
@@ -1116,6 +1200,9 @@ export default function MapView() {
     setPlacesState("loading");
     setVisible(60);
     void filter; // filtering happens client-side now; fetch every kind once
+    // T-031: `finally` covers both stale-gen returns above, the !r.ok early
+    // return, the catch block, and the ordinary success path.
+    beginLoading();
     try {
       const r = await fetch(
         `/api/amenities?lat=${lat}&lon=${lon}&profile=${profileRef.current}` +
@@ -1138,6 +1225,8 @@ export default function MapView() {
       if (gen !== placesGenRef.current) return;
       setPlaces([]);
       setPlacesState("empty");
+    } finally {
+      endLoading();
     }
   };
   loadPlacesRef.current = loadPlaces;
@@ -1263,6 +1352,10 @@ export default function MapView() {
     if (q.length < 2) return;
     setSearchState("loading");
     setResults([]);
+    // T-031: begun only past the q.length guard above, since that return
+    // exits before any request starts — nothing to release for it. `finally`
+    // then covers the !r.ok early return, the catch, and the success path.
+    beginLoading();
     try {
       const r = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
       const d = await r.json();
@@ -1275,6 +1368,8 @@ export default function MapView() {
     } catch {
       setSearchError("Could not reach the place search service.");
       setSearchState("error");
+    } finally {
+      endLoading();
     }
   };
 
@@ -1290,7 +1385,6 @@ export default function MapView() {
     // done its job, and it shares the top strip with the import offer.
     setArrival(false);
     map.setView([r.lat, r.lon], 14);
-    lastClickRef.current = [r.lat, r.lon];
     updateRef.current(r.lat, r.lon);
     if (window.innerWidth <= 720) setPanelOpen(false);
   };
@@ -1393,6 +1487,11 @@ export default function MapView() {
       const ac = new AbortController();
       suggestAbortRef.current = ac;
       setSuggestState("loading");
+      // T-031: .finally, not try/finally — this is a .then chain, not
+      // async/await. It runs whether the chain resolves, rejects with the
+      // superseded-request AbortError caught below, or rejects with anything
+      // else, so the counter always comes back down.
+      beginLoading();
       fetch(`/api/suggest?profile=${suggestProfile}&w=${encodeURIComponent(w)}`, {
         signal: ac.signal,
       })
@@ -1418,7 +1517,8 @@ export default function MapView() {
           // one wrong answer this panel must never give.
           setSuggestState("error");
           drawSuggestRef.current([]);
-        });
+        })
+        .finally(() => endLoading());
 
       // Whole-city heatmap, fetched in parallel with the markers above — a
       // second fetch() call, not awaited between them, so a slow grid can
@@ -1430,6 +1530,7 @@ export default function MapView() {
       suggestGridAbortRef.current?.abort();
       const gridAc = new AbortController();
       suggestGridAbortRef.current = gridAc;
+      beginLoading();
       fetch(`/api/suggest-grid?profile=${suggestProfile}&w=${encodeURIComponent(w)}`, {
         signal: gridAc.signal,
       })
@@ -1438,7 +1539,8 @@ export default function MapView() {
         .catch((err) => {
           if (err?.name === "AbortError") return; // superseded by a newer answer
           drawHeatRef.current({ available: false }); // network blip: no heatmap, not a stale one
-        });
+        })
+        .finally(() => endLoading());
     }, 400);
     return () => clearTimeout(t);
   }, [suggestAnswers, suggestProfile]);
@@ -1487,6 +1589,19 @@ export default function MapView() {
     ? places.filter((pl) => activeGroup.kinds.includes(pl.kind))
     : places;
 
+  // T-031: shared by the left panel's chips and the map popup's chips, so
+  // whichever one you click, the same state drives the same filter — see
+  // ACCEPT in the spec.
+  const toggleKindFilter = (label: string) => {
+    const next = kindFilter === label ? null : label;
+    setKindFilter(next);
+    setVisible(60);
+    const grp = groups.find((x) => x.label === next);
+    drawPlacesRef.current(
+      grp ? placesRef.current.filter((pl) => grp.kinds.includes(pl.kind)) : placesRef.current
+    );
+  };
+
   // Layers actually asked about, in the current answer set — drives which
   // per-cell times (or "no X in 30 min") each result row prints.
   const currentWeights = buildSuggestWeights(suggestAnswers);
@@ -1503,6 +1618,87 @@ export default function MapView() {
   })
     .filter(Boolean)
     .join(" · ");
+
+  // T-031: the click result moved off the sidebar and onto the map as a
+  // popup — a compact summary (walk time, total reachable, the seven group
+  // chips), not the full list, which still lives in the left panel. Rebuilt
+  // from scratch on every relevant change rather than patched in place: the
+  // content is a handful of DOM nodes, and focusPlace/focusSuggestion below
+  // already build fresh L.popup() instances the same way, so this matches
+  // the existing convention instead of adding a new one.
+  //
+  // ponytail: the chip click handler below duplicates toggleKindFilter's
+  // four lines rather than calling it, so this effect's dependency array can
+  // stay honest (toggleKindFilter is redefined every render and would force
+  // a rebuild — and a popup reopen — on every keystroke in the search box).
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    if (!clickSummary) {
+      map.closePopup();
+      return;
+    }
+    const { lat, lon } = clickSummary;
+
+    const wrap = document.createElement("div");
+    wrap.className = "click-popup";
+
+    const head = document.createElement("div");
+    head.className = "click-popup-head";
+    head.textContent = `${shownMinutes} min ${
+      PROFILE_TRIP[profile] ?? profile
+    } · ${places.length.toLocaleString()} places within reach`;
+    wrap.appendChild(head);
+
+    if (groups.length) {
+      const chips = document.createElement("div");
+      chips.className = "chips click-popup-chips";
+      for (const g of groups) {
+        const n = places.reduce((c, pl) => c + (g.kinds.includes(pl.kind) ? 1 : 0), 0);
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.disabled = !n;
+        btn.setAttribute("aria-pressed", String(kindFilter === g.label));
+        if (kindFilter === g.label) {
+          btn.style.background = g.color;
+          btn.style.borderColor = g.color;
+          btn.style.color = "#fff";
+        }
+        const icon = document.createElement("span");
+        icon.setAttribute("aria-hidden", "true");
+        icon.textContent = g.icon;
+        btn.append(icon, ` ${g.label}`);
+        if (n > 0) {
+          const nSpan = document.createElement("span");
+          nSpan.className = "chip-n";
+          nSpan.textContent = String(n);
+          btn.appendChild(nSpan);
+        }
+        // Same kindFilter state the sidebar chips drive (see toggleKindFilter
+        // above) — deliberately inlined, not called, see the comment above.
+        btn.addEventListener("click", () => {
+          const next = kindFilter === g.label ? null : g.label;
+          setKindFilter(next);
+          setVisible(60);
+          const grp = groups.find((x) => x.label === next);
+          drawPlacesRef.current(
+            grp
+              ? placesRef.current.filter((pl) => grp.kinds.includes(pl.kind))
+              : placesRef.current
+          );
+        });
+        chips.appendChild(btn);
+      }
+      wrap.appendChild(chips);
+    }
+
+    L.popup({ className: "click-popup-wrap", autoPan: false })
+      .setLatLng([lat, lon])
+      .setContent(wrap)
+      .openOn(map);
+    // profile is in here because the heading names it; without it the popup
+    // kept the wording from whichever profile was active when it opened.
+  }, [clickSummary, places, groups, kindFilter, shownMinutes, profile]);
 
   return (
     <div className="app">
@@ -1571,32 +1767,20 @@ export default function MapView() {
             ))}
           </div>
 
-          <div className="ramp">
-            <div className="ramp-bar">
-              {basemap.ramp.map((c) => (
-                <i key={c} style={{ background: c }} />
-              ))}
-            </div>
-            <div className="ramp-scale">
-              <span>0</span>
-              <span>{shownMinutes} min</span>
-            </div>
-          </div>
-
-          {heatAvailable && (
-            <div className="ramp heat-ramp">
+          {/* Only once bands are actually drawn — before the first click, or
+              after a click that came back empty/offer/error, this legend
+              would be answering a question nobody asked yet. */}
+          {clickSummary && (
+            <div className="ramp">
               <div className="ramp-bar">
-                {HEAT_STOPS.map(([, c]) => (
+                {basemap.ramp.map((c) => (
                   <i key={c} style={{ background: c }} />
                 ))}
               </div>
-              {/* Percentile rank always spreads the full ramp, even when the
-                  real spread between the best and worst cell is tiny — same
-                  honesty fix as the "alternatives, not a ranking" line
-                  above. An absolute reading of these colours would be a lie. */}
-              <p className="muted heat-legend-note">
-                worse ← compared with the rest of Berlin → better
-              </p>
+              <div className="ramp-scale">
+                <span>0</span>
+                <span>{shownMinutes} min</span>
+              </div>
             </div>
           )}
 
@@ -1606,119 +1790,6 @@ export default function MapView() {
               data yet. Click one to import it.
             </p>
           )}
-
-          <section className="suggest">
-            <div className="places-head">
-              <h2>Where should I live?</h2>
-            </div>
-            <p className="muted suggest-honesty">
-              Ranks reachability only — not rent, not noise, not transit.
-            </p>
-
-            {suggestState === "idle" ? (
-              // T-017: no always-visible questionnaire. Suggestions are a
-              // mode you enter, not a control that crowds this panel.
-              <button
-                ref={discoverBtnRef}
-                type="button"
-                className="discover-btn"
-                onClick={openSuggestModal}
-              >
-                Discover suitable living locations in Berlin
-              </button>
-            ) : (
-              <>
-                <div className="suggest-summary">
-                  <p className="suggest-summary-text">{suggestSummary}</p>
-                  <button
-                    ref={discoverBtnRef}
-                    type="button"
-                    className="linkish"
-                    onClick={openSuggestModal}
-                  >
-                    edit answers
-                  </button>
-                </div>
-
-                {suggestState === "unavailable" && (
-                  <p className="muted">
-                    {suggestReason ||
-                      "Suggestions are only available for Berlin right now."}
-                  </p>
-                )}
-                {suggestState === "loading" && (
-                  <p className="muted">Ranking…</p>
-                )}
-                {suggestState === "empty" && (
-                  <p className="muted">No matches for this answer set.</p>
-                )}
-                {suggestState === "error" && (
-                  <p className="suggest-miss">
-                    Could not reach the server — this is not a result, try again.
-                  </p>
-                )}
-
-                {suggestState === "ok" && suggestCells.length > 0 && (
-                  <>
-                    <p className="muted suggest-tie-note">
-                      {scoresAreTied(suggestCells)
-                        ? `${suggestCells.length} areas, all equally close to what you picked — they are alternatives, not a ranking.`
-                        : `${suggestCells.length} areas, best first.`}
-                    </p>
-                    <ul className="place-list suggest-results">
-                      {suggestCells.map((c, i) => (
-                        <li key={`${c.lat},${c.lon}`}>
-                          <button onClick={() => focusSuggestion(c)} title="Show on map">
-                            {/* Plain enumeration, not a score. A bare bullet
-                                read as a broken list marker, and a normalised
-                                0-100 would be worse than either: stretching
-                                1.0000-0.9942 across a full range manufactures a
-                                large-looking difference out of 0.6%. The note
-                                above already says these are alternatives, so
-                                the number is just "which one am I looking at".
-                                Revisit once density gives a real spread. */}
-                            <span className="pl-min suggest-rank">{i + 1}</span>
-                            <span className="pl-body">
-                              <span className="pl-name">
-                                {c.name ??
-                                  `${c.lat.toFixed(4)}, ${c.lon.toFixed(4)}`}
-                              </span>
-                              <span className="pl-kind suggest-layers">
-                                {suggestLayers.map((layer) => {
-                                  const secs = c.layers[layer];
-                                  // The count is the half of the score the time
-                                  // cannot show: every top result is "<1′" from
-                                  // everything, and what separates them is 140
-                                  // shops nearby versus 55 (T-019).
-                                  const near = c.nearby?.[layer];
-                                  return (
-                                    <span
-                                      key={layer}
-                                      className={
-                                        secs == null
-                                          ? "suggest-layer suggest-miss"
-                                          : "suggest-layer"
-                                      }
-                                    >
-                                      {secs == null
-                                        ? `no ${LAYER_LABEL[layer]} in 30 min`
-                                        : `${LAYER_LABEL[layer]} ${reachLabel(secs)}${
-                                            near ? ` · ${near}` : ""
-                                          }`}
-                                    </span>
-                                  );
-                                })}
-                              </span>
-                            </span>
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  </>
-                )}
-              </>
-            )}
-          </section>
 
           <section className="places">
             <div className="places-head">
@@ -1741,17 +1812,7 @@ export default function MapView() {
                         ? { background: g.color, borderColor: g.color, color: "#fff" }
                         : undefined
                     }
-                    onClick={() => {
-                      const next = kindFilter === g.label ? null : g.label;
-                      setKindFilter(next);
-                      setVisible(60);
-                      const grp = groups.find((x) => x.label === next);
-                      drawPlacesRef.current(
-                        grp
-                          ? placesRef.current.filter((pl) => grp.kinds.includes(pl.kind))
-                          : placesRef.current
-                      );
-                    }}
+                    onClick={() => toggleKindFilter(g.label)}
                   >
                     <span aria-hidden="true">{g.icon}</span> {g.label}
                     {n > 0 && <span className="chip-n">{n}</span>}
@@ -1804,9 +1865,168 @@ export default function MapView() {
             </ul>
           </section>
 
+          {/* T-031: Discover moved off the left panel onto its own right-edge
+              rail (see the .rail CSS) — nested here, rather than as a sibling
+              of <aside className="panel">, so a narrow viewport can fold it
+              straight into the bottom sheet's own scroll flow as one more
+              section instead of needing a second fixed panel that would not
+              fit next to it. Known weakness of this design, being compared
+              against two alternative layouts on separate branches. */}
+          <aside className={`rail${railOpen ? "" : " rail-closed"}`}>
+            <section className="suggest">
+              <div className="places-head">
+                <h2>Where should I live?</h2>
+                <button
+                  type="button"
+                  className="rail-toggle"
+                  aria-expanded={railOpen}
+                  aria-label={railOpen ? "Collapse Discover" : "Expand Discover"}
+                  onClick={() => setRailOpen((o) => !o)}
+                >
+                  {railOpen ? "−" : "+"}
+                </button>
+              </div>
+
+              {railOpen && (
+                <>
+                  <p className="muted suggest-honesty">
+                    Ranks reachability only — not rent, not noise, not transit.
+                  </p>
+
+                  {suggestState === "idle" ? (
+                    // T-017: no always-visible questionnaire. Suggestions are a
+                    // mode you enter, not a control that crowds this panel.
+                    <button
+                      ref={discoverBtnRef}
+                      type="button"
+                      className="discover-btn"
+                      onClick={openSuggestModal}
+                    >
+                      Discover suitable living locations in Berlin
+                    </button>
+                  ) : (
+                    <>
+                      <div className="suggest-summary">
+                        <p className="suggest-summary-text">{suggestSummary}</p>
+                        <button
+                          ref={discoverBtnRef}
+                          type="button"
+                          className="linkish"
+                          onClick={openSuggestModal}
+                        >
+                          edit answers
+                        </button>
+                      </div>
+
+                      {suggestState === "unavailable" && (
+                        <p className="muted">
+                          {suggestReason ||
+                            "Suggestions are only available for Berlin right now."}
+                        </p>
+                      )}
+                      {suggestState === "loading" && (
+                        <p className="muted">Ranking…</p>
+                      )}
+                      {suggestState === "empty" && (
+                        <p className="muted">No matches for this answer set.</p>
+                      )}
+                      {suggestState === "error" && (
+                        <p className="suggest-miss">
+                          Could not reach the server — this is not a result, try again.
+                        </p>
+                      )}
+
+                      {suggestState === "ok" && suggestCells.length > 0 && (
+                        <>
+                          <p className="muted suggest-tie-note">
+                            {scoresAreTied(suggestCells)
+                              ? `${suggestCells.length} areas, all equally close to what you picked — they are alternatives, not a ranking.`
+                              : `${suggestCells.length} areas, best first.`}
+                          </p>
+                          <ul className="place-list suggest-results">
+                            {suggestCells.map((c, i) => (
+                              <li key={`${c.lat},${c.lon}`}>
+                                <button onClick={() => focusSuggestion(c)} title="Show on map">
+                                  {/* Plain enumeration, not a score. A bare bullet
+                                      read as a broken list marker, and a normalised
+                                      0-100 would be worse than either: stretching
+                                      1.0000-0.9942 across a full range manufactures a
+                                      large-looking difference out of 0.6%. The note
+                                      above already says these are alternatives, so
+                                      the number is just "which one am I looking at".
+                                      Revisit once density gives a real spread. */}
+                                  <span className="pl-min suggest-rank">{i + 1}</span>
+                                  <span className="pl-body">
+                                    <span className="pl-name">
+                                      {c.name ??
+                                        `${c.lat.toFixed(4)}, ${c.lon.toFixed(4)}`}
+                                    </span>
+                                    <span className="pl-kind suggest-layers">
+                                      {suggestLayers.map((layer) => {
+                                        const secs = c.layers[layer];
+                                        // The count is the half of the score the time
+                                        // cannot show: every top result is "<1′" from
+                                        // everything, and what separates them is 140
+                                        // shops nearby versus 55 (T-019).
+                                        const near = c.nearby?.[layer];
+                                        return (
+                                          <span
+                                            key={layer}
+                                            className={
+                                              secs == null
+                                                ? "suggest-layer suggest-miss"
+                                                : "suggest-layer"
+                                            }
+                                          >
+                                            {secs == null
+                                              ? `no ${LAYER_LABEL[layer]} in 30 min`
+                                              : `${LAYER_LABEL[layer]} ${reachLabel(secs)}${
+                                                  near ? ` · ${near}` : ""
+                                                }`}
+                                          </span>
+                                        );
+                                      })}
+                                    </span>
+                                  </span>
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        </>
+                      )}
+                    </>
+                  )}
+
+                  {heatAvailable && (
+                    <div className="ramp heat-ramp">
+                      <div className="ramp-bar">
+                        {HEAT_STOPS.map(([, c]) => (
+                          <i key={c} style={{ background: c }} />
+                        ))}
+                      </div>
+                      {/* Percentile rank always spreads the full ramp, even when the
+                          real spread between the best and worst cell is tiny — same
+                          honesty fix as the "alternatives, not a ranking" line
+                          above. An absolute reading of these colours would be a lie. */}
+                      <p className="muted heat-legend-note">
+                        worse ← compared with the rest of Berlin → better
+                      </p>
+                    </div>
+                  )}
+                </>
+              )}
+            </section>
+          </aside>
+
+          {/* Demoted meta (T-031): evidence the importer works and the MCP
+              install line, neither of which answers anything about the
+              current click — collapsed by default, following HelpPanel's
+              existing <details> convention. */}
           {recent.length > 0 && (
-            <section className="recent">
-              <h2>Recently added</h2>
+            <details className="recent">
+              <summary>
+                {recent.length} area{recent.length === 1 ? "" : "s"} added recently
+              </summary>
               <ul>
                 {recent.map((a) => (
                   <li key={a.id}>
@@ -1829,11 +2049,11 @@ export default function MapView() {
                   </li>
                 ))}
               </ul>
-            </section>
+            </details>
           )}
 
-          <footer className="panel-foot">
-            <div className="foot-title">Ask Claude about this map</div>
+          <details className="panel-foot">
+            <summary>Ask Claude about this map</summary>
             <div className="foot-cmd">
               <code>claude mcp add isochrone -- npx -y isochrone-mcp</code>
               <button
@@ -1861,11 +2081,19 @@ export default function MapView() {
             >
               see what you can ask
             </button>
-          </footer>
+          </details>
         </div>
       </aside>
 
       <div className="map-wrap">
+        {/* T-031: the one shared loading signal — see loadingCount above.
+            Indeterminate, so no aria-valuenow/min/max: their presence is what
+            tells a screen reader this has a real percentage, which would be a
+            lie here. role+aria-label alone is the correct indeterminate
+            progressbar per WAI-ARIA. */}
+        {loadingCount > 0 && (
+          <div className="loading-bar" role="progressbar" aria-label="Loading" />
+        )}
         <div
           ref={toastRef}
           className="toast"
