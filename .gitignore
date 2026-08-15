@@ -26,3 +26,7 @@ tickets/
 # agent orchestration
 CLAUDE.md
 .claude/
+
+# Caddy access logs: the directory is tracked for the local mount, the logs are not.
+caddy-logs/*
+!caddy-logs/README.md

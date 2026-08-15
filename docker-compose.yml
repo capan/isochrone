@@ -70,6 +70,11 @@ services:
       # Env-defaulted like CADDY_SITES_DIR so a Mac mounts the tracked empty
       # ./caddy-sites rather than an /opt path that does not exist there.
       - ${SITE_ROOT_DIR:-./caddy-sites}:/srv/site:ro
+      # Access logs. The personal site's block writes JSON here and Caddy
+      # rotates it; this stack only has to put the directory on the host so it
+      # can be read over SSH, and so it survives the container being recreated.
+      # NOT read-only, unlike the two mounts above: Caddy is the writer here.
+      - ${CADDY_LOGS_DIR:-./caddy-logs}:/var/log/caddy
       - caddydata:/data
       - caddyconfig:/config
     ports:
