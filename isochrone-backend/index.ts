@@ -633,7 +633,7 @@ const evictToFit = async () => {
     if (!row) return false; // nothing evictable left; caller must refuse
     await pool.query(`DROP SCHEMA IF EXISTS ${row.schema_name} CASCADE`);
     await pool.query(`DELETE FROM public.areas WHERE id = $1`, [row.id]);
-    coverageBboxes.delete(row.schema_name);
+    graphExtents.delete(row.schema_name);
     const now = await importedMb();
     console.log(
       `🧹 evicted ${row.schema_name} (least recently used) — freed ${Math.round(
@@ -649,17 +649,27 @@ const evictToFit = async () => {
 // number — it was unbounded until this constant was shared, see that comment.
 const MAX_SNAP_M = MAX_SNAP_METERS;
 
-// Coverage extent for the 400 message, memoized per schema — a single cached
-// string would go stale the moment a new area is imported.
-const coverageBboxes = new Map<string, string>();
-const getCoverage = async (schema: string) => {
-  if (!coverageBboxes.has(schema)) {
+// The GRAPH's bounding rectangle, for the 400 message. Named for what it holds:
+// this is a third geometry, distinct from both areas.bbox (what was asked for)
+// and areas.coverage (what is routable), and calling it "coverage" is how the
+// 400 came to describe a rectangle as coverage on the one path where the point
+// is definitively not covered (T-026). It is the widest of the three and must
+// never be used to decide anything — /api/coverage and resolveSchema own that,
+// both via COALESCE(coverage, bbox).
+//
+// Memoized per schema; a single cached string would go stale the moment a new
+// area is imported. Only evictToFit clears an entry, which is sound solely
+// because schema names are `area_<serial>` and ids are never reused — a scheme
+// that recycled names would serve a dropped area's extent.
+const graphExtents = new Map<string, string>();
+const getGraphExtent = async (schema: string) => {
+  if (!graphExtents.has(schema)) {
     const r = await pool.query(
       `SELECT ST_Extent(geom)::text AS b FROM ${schema}.ways_vertices_pgr WHERE main_component`
     );
-    coverageBboxes.set(schema, r.rows[0]?.b ?? "unknown");
+    graphExtents.set(schema, r.rows[0]?.b ?? "unknown");
   }
-  return coverageBboxes.get(schema);
+  return graphExtents.get(schema);
 };
 
 // Checked before the rate limiter so monitoring never consumes quota.
@@ -742,6 +752,14 @@ app.get("/api/coverage", pollLimiter, async (_, res) => {
   const bboxOnly = `SELECT ST_AsGeoJSON(ST_Union(bbox))::jsonb AS g
                       FROM public.areas WHERE status = 'ready'`;
 
+  // The fingerprint sees rows appearing, disappearing, and coverage going from
+  // NULL to computed — count(coverage) counts non-nulls. It cannot see a mask
+  // being RESHAPED in place, because that changes neither count. Sound today
+  // only because no path does it: storeCoverage runs on a freshly inserted area
+  // (count changes) and backfillCoverage touches only rows where coverage IS
+  // NULL (count changes). Add a recompute of an existing non-null mask — after a
+  // POI sweep, a migration, a re-dissolve — and this cache will serve the old
+  // veil until the process restarts. Extend the key in the same commit.
   let key = "nokey";
   try {
     const f = await pool.query(
@@ -2454,11 +2472,24 @@ app.get("/api/isochrone", async (req: any, res: any) => {
       }
       return res.status(400).json({
         error: "outside coverage",
+        // Says "graph spans", not "coverage is": the value is a bounding
+        // rectangle around the vertices, and this branch fires precisely where
+        // the routable footprint does not reach. It deliberately claims no
+        // directional relationship to the mask, because there isn't one — the
+        // first draft of this sentence said "wider than the ground that actually
+        // routes" and that is false in both directions: the rectangle covers
+        // interior ground with no streets, while computeCoverage's ST_Expand
+        // pushes the mask up to ~222m past a vertex, so the mask also spills
+        // outside the rectangle. Measured on area_24: 63,140 m² of stored
+        // coverage lies outside ST_Extent of that schema's main_component
+        // vertices. Kept because a client — an LLM especially — needs somewhere
+        // to anchor the bbox it is being told to POST, and an empty refusal is
+        // what made Paris return 200 with no features.
         detail: `Nearest routable street is ${Math.round(
           row.dist_m / 1000
-        )}km away. Imported coverage here is ${schema} (bbox ${await getCoverage(
+        )}km away. This point is served by ${schema}, whose graph spans ${await getGraphExtent(
           schema
-        )}). POST /api/areas with a bbox to import a new area.`,
+        )} — a bounding rectangle, not the shape that routes. POST /api/areas with a bbox to import coverage here.`,
       });
     }
     vertexId = row.id;
