@@ -2472,16 +2472,24 @@ app.get("/api/isochrone", async (req: any, res: any) => {
       }
       return res.status(400).json({
         error: "outside coverage",
-        // Says "graph spans", not "coverage is": the value is a rectangle around
-        // the whole graph, and this branch fires precisely where the routable
-        // footprint does not reach. Kept because a client — an LLM especially —
-        // needs somewhere to anchor the bbox it is being told to POST, and an
-        // empty refusal is what made Paris return 200 with no features.
+        // Says "graph spans", not "coverage is": the value is a bounding
+        // rectangle around the vertices, and this branch fires precisely where
+        // the routable footprint does not reach. It deliberately claims no
+        // directional relationship to the mask, because there isn't one — the
+        // first draft of this sentence said "wider than the ground that actually
+        // routes" and that is false in both directions: the rectangle covers
+        // interior ground with no streets, while computeCoverage's ST_Expand
+        // pushes the mask up to ~222m past a vertex, so the mask also spills
+        // outside the rectangle. Measured on area_24: 63,140 m² of stored
+        // coverage lies outside ST_Extent of that schema's main_component
+        // vertices. Kept because a client — an LLM especially — needs somewhere
+        // to anchor the bbox it is being told to POST, and an empty refusal is
+        // what made Paris return 200 with no features.
         detail: `Nearest routable street is ${Math.round(
           row.dist_m / 1000
         )}km away. This point is served by ${schema}, whose graph spans ${await getGraphExtent(
           schema
-        )} — a rectangle, wider than the ground that actually routes. POST /api/areas with a bbox to import coverage here.`,
+        )} — a bounding rectangle, not the shape that routes. POST /api/areas with a bbox to import coverage here.`,
       });
     }
     vertexId = row.id;
