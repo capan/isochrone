@@ -593,6 +593,21 @@ export default function MapView() {
   // heatLayerRef, same split as isochroneRef/shownMinutes above.
   const [heatAvailable, setHeatAvailable] = useState(false);
 
+  // T-031: one shared "something is loading" signal for the thin bar at the
+  // top of the map (see .loading-bar below), covering the five requests that
+  // previously gave no feedback at all. A counter, not a boolean — two of
+  // these fire in parallel by design (/api/suggest and /api/suggest-grid on
+  // every questionnaire answer; a map click firing the isochrone then
+  // /api/amenities), and a boolean would flip off while the other was still
+  // in flight. Every increment is paired with a decrement in a `finally`, so
+  // an early return, an aborted request and a thrown error all still release
+  // it — see the five call sites below. No ref needed alongside the state:
+  // every reader here only ever bumps the counter with a functional update,
+  // never reads its current value synchronously.
+  const [loadingCount, setLoadingCount] = useState(0);
+  const beginLoading = () => setLoadingCount((c) => c + 1);
+  const endLoading = () => setLoadingCount((c) => Math.max(0, c - 1));
+
   const closeHelp = () => {
     setHelp(false);
     setHelpFocus(undefined);
@@ -1052,77 +1067,89 @@ export default function MapView() {
       );
       setShownMinutes(minutes);
 
+      // T-031: the primary interaction (click → bands) had no loading signal
+      // at all. beginLoading/endLoading wrap the whole request-to-draw span,
+      // not just the fetch, so the bar stays up through layer building too.
+      // The `finally` is what makes the decrement unconditional across every
+      // exit this function has: the stale-gen returns below (both inside the
+      // try and inside the catch), the outside-coverage/error return, a
+      // thrown error, and the ordinary path all funnel through it.
+      beginLoading();
       try {
-        const res = await fetch(
-          `/api/isochrone?lat=${lat}&lon=${lng}&minutes=${minutes}` +
-            `&profile=${profileRef.current}`
-        );
-        const data = await res.json();
-        if (gen !== drawGenRef.current) return; // a newer click already won
-
-        if (!res.ok) {
-          // Outside coverage is now an offer, not a dead end.
-          if (data.error === "outside coverage") {
-            setOffer({ lat, lon: lng });
-          } else {
-            showToast(data.detail ?? data.error ?? `Request failed (${res.status})`);
-          }
-          clearIsochrone();
-          setClickSummary(null);
-          return;
-        }
-
-        setOffer(null);
-
-        // farthest band first, so nearer streets draw on top at junctions
-        const features = [...data.geojson.features].sort(
-          (a, b) => b.properties.band - a.properties.band
-        );
-
-        for (const feature of features) {
-          const band: number = feature.properties.band;
-          const until = (data.minutes / data.bands) * band;
-
-          const layer = L.geoJSON(feature, {
-            style: {
-              color: BASEMAPS[basemapRef.current].ramp[band - 1],
-              weight: 2,
-              opacity: 0.9,
-            },
-          })
-            // identity never rests on color alone
-            .bindTooltip(`≤ ${until.toFixed(1)} min`, { sticky: true });
-
-          layers.push(layer);
-        }
-
-        if (!features.length) {
-          // Do not guess at the cause. This fires on a 200 with no bands, which
-          // means the click DID snap to a routable vertex — the server's 400
-          // covers the "no street nearby" case with an exact distance. So the
-          // spot is on the network and simply cannot reach anything in the time
-          // budget: measured on vertex 70954, whose only edge is a 1,764m path,
-          // 21 minutes on foot and therefore empty at 15. The old copy blamed
-          // "stairs or rough surfaces", which is wrong for walk in particular —
-          // stairs are passable there at half speed (PROFILES in layers.ts).
-          showToast(
-            `Nothing reachable within ${data.minutes} min from here on "${profileRef.current}". Try more minutes, or another profile.`
+        try {
+          const res = await fetch(
+            `/api/isochrone?lat=${lat}&lon=${lng}&minutes=${minutes}` +
+              `&profile=${profileRef.current}`
           );
-        }
-      } catch (err) {
-        if (gen !== drawGenRef.current) return;
-        console.error("Isochrone network fetch failed", err);
-        showToast("Could not reach the isochrone service. Try again in a moment.");
-        setClickSummary(null);
-      }
+          const data = await res.json();
+          if (gen !== drawGenRef.current) return; // a newer click already won
 
-      if (gen !== drawGenRef.current) return;
-      clearIsochrone();
-      isochroneRef.current = L.layerGroup(layers).addTo(map);
-      // Bands drawn (not just a 200): the "nothing reachable" case above still
-      // clears the layer to empty, and the popup has nothing worth summarising.
-      setClickSummary(layers.length ? { lat, lon: lng } : null);
-      if (layers.length) loadPlacesRef.current(lat, lng);
+          if (!res.ok) {
+            // Outside coverage is now an offer, not a dead end.
+            if (data.error === "outside coverage") {
+              setOffer({ lat, lon: lng });
+            } else {
+              showToast(data.detail ?? data.error ?? `Request failed (${res.status})`);
+            }
+            clearIsochrone();
+            setClickSummary(null);
+            return;
+          }
+
+          setOffer(null);
+
+          // farthest band first, so nearer streets draw on top at junctions
+          const features = [...data.geojson.features].sort(
+            (a, b) => b.properties.band - a.properties.band
+          );
+
+          for (const feature of features) {
+            const band: number = feature.properties.band;
+            const until = (data.minutes / data.bands) * band;
+
+            const layer = L.geoJSON(feature, {
+              style: {
+                color: BASEMAPS[basemapRef.current].ramp[band - 1],
+                weight: 2,
+                opacity: 0.9,
+              },
+            })
+              // identity never rests on color alone
+              .bindTooltip(`≤ ${until.toFixed(1)} min`, { sticky: true });
+
+            layers.push(layer);
+          }
+
+          if (!features.length) {
+            // Do not guess at the cause. This fires on a 200 with no bands, which
+            // means the click DID snap to a routable vertex — the server's 400
+            // covers the "no street nearby" case with an exact distance. So the
+            // spot is on the network and simply cannot reach anything in the time
+            // budget: measured on vertex 70954, whose only edge is a 1,764m path,
+            // 21 minutes on foot and therefore empty at 15. The old copy blamed
+            // "stairs or rough surfaces", which is wrong for walk in particular —
+            // stairs are passable there at half speed (PROFILES in layers.ts).
+            showToast(
+              `Nothing reachable within ${data.minutes} min from here on "${profileRef.current}". Try more minutes, or another profile.`
+            );
+          }
+        } catch (err) {
+          if (gen !== drawGenRef.current) return;
+          console.error("Isochrone network fetch failed", err);
+          showToast("Could not reach the isochrone service. Try again in a moment.");
+          setClickSummary(null);
+        }
+
+        if (gen !== drawGenRef.current) return;
+        clearIsochrone();
+        isochroneRef.current = L.layerGroup(layers).addTo(map);
+        // Bands drawn (not just a 200): the "nothing reachable" case above still
+        // clears the layer to empty, and the popup has nothing worth summarising.
+        setClickSummary(layers.length ? { lat, lon: lng } : null);
+        if (layers.length) loadPlacesRef.current(lat, lng);
+      } finally {
+        endLoading();
+      }
     };
     updateRef.current = updateIsochrones;
 
@@ -1173,6 +1200,9 @@ export default function MapView() {
     setPlacesState("loading");
     setVisible(60);
     void filter; // filtering happens client-side now; fetch every kind once
+    // T-031: `finally` covers both stale-gen returns above, the !r.ok early
+    // return, the catch block, and the ordinary success path.
+    beginLoading();
     try {
       const r = await fetch(
         `/api/amenities?lat=${lat}&lon=${lon}&profile=${profileRef.current}` +
@@ -1195,6 +1225,8 @@ export default function MapView() {
       if (gen !== placesGenRef.current) return;
       setPlaces([]);
       setPlacesState("empty");
+    } finally {
+      endLoading();
     }
   };
   loadPlacesRef.current = loadPlaces;
@@ -1320,6 +1352,10 @@ export default function MapView() {
     if (q.length < 2) return;
     setSearchState("loading");
     setResults([]);
+    // T-031: begun only past the q.length guard above, since that return
+    // exits before any request starts — nothing to release for it. `finally`
+    // then covers the !r.ok early return, the catch, and the success path.
+    beginLoading();
     try {
       const r = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
       const d = await r.json();
@@ -1332,6 +1368,8 @@ export default function MapView() {
     } catch {
       setSearchError("Could not reach the place search service.");
       setSearchState("error");
+    } finally {
+      endLoading();
     }
   };
 
@@ -1449,6 +1487,11 @@ export default function MapView() {
       const ac = new AbortController();
       suggestAbortRef.current = ac;
       setSuggestState("loading");
+      // T-031: .finally, not try/finally — this is a .then chain, not
+      // async/await. It runs whether the chain resolves, rejects with the
+      // superseded-request AbortError caught below, or rejects with anything
+      // else, so the counter always comes back down.
+      beginLoading();
       fetch(`/api/suggest?profile=${suggestProfile}&w=${encodeURIComponent(w)}`, {
         signal: ac.signal,
       })
@@ -1474,7 +1517,8 @@ export default function MapView() {
           // one wrong answer this panel must never give.
           setSuggestState("error");
           drawSuggestRef.current([]);
-        });
+        })
+        .finally(() => endLoading());
 
       // Whole-city heatmap, fetched in parallel with the markers above — a
       // second fetch() call, not awaited between them, so a slow grid can
@@ -1486,6 +1530,7 @@ export default function MapView() {
       suggestGridAbortRef.current?.abort();
       const gridAc = new AbortController();
       suggestGridAbortRef.current = gridAc;
+      beginLoading();
       fetch(`/api/suggest-grid?profile=${suggestProfile}&w=${encodeURIComponent(w)}`, {
         signal: gridAc.signal,
       })
@@ -1494,7 +1539,8 @@ export default function MapView() {
         .catch((err) => {
           if (err?.name === "AbortError") return; // superseded by a newer answer
           drawHeatRef.current({ available: false }); // network blip: no heatmap, not a stale one
-        });
+        })
+        .finally(() => endLoading());
     }, 400);
     return () => clearTimeout(t);
   }, [suggestAnswers, suggestProfile]);
@@ -2040,6 +2086,14 @@ export default function MapView() {
       </aside>
 
       <div className="map-wrap">
+        {/* T-031: the one shared loading signal — see loadingCount above.
+            Indeterminate, so no aria-valuenow/min/max: their presence is what
+            tells a screen reader this has a real percentage, which would be a
+            lie here. role+aria-label alone is the correct indeterminate
+            progressbar per WAI-ARIA. */}
+        {loadingCount > 0 && (
+          <div className="loading-bar" role="progressbar" aria-label="Loading" />
+        )}
         <div
           ref={toastRef}
           className="toast"
