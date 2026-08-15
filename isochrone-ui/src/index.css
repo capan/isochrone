@@ -189,9 +189,10 @@ a { color: #2a63b5; }
 .pl-kind { color: #8b929a; font-size: 11px; }
 
 /* Evidence that people add areas — the importer is otherwise invisible
-   unless you happen to pan somewhere dark. */
+   unless you happen to pan somewhere dark. Demoted (T-031) behind a native
+   <details>, collapsed by default — HelpPanel already uses this pattern. */
 .recent { border-top: 1px solid #eceef1; margin-top: 14px; padding-top: 12px; }
-.recent h2 { margin: 0 0 6px; font: 600 13px system-ui; }
+.recent summary { margin: 0 0 6px; font: 600 13px system-ui; color: #33383d; cursor: pointer; }
 .recent ul { list-style: none; margin: 0; padding: 0; }
 .recent li + li { border-top: 1px solid #f2f4f6; }
 .recent button {
@@ -205,7 +206,8 @@ a { color: #2a63b5; }
 .re-mine { color: #7c4dff; }
 
 /* The install line used to wrap mid-word into a grey smear. Now it is a
-   proper block: one scrollable line plus a copy button, so it never breaks. */
+   proper block: one scrollable line plus a copy button, so it never breaks.
+   Demoted (T-031) behind a native <details>, collapsed by default. */
 .panel-foot {
   margin-top: 18px;
   padding: 10px 11px;
@@ -213,8 +215,8 @@ a { color: #2a63b5; }
   border-radius: 8px;
   background: #fafbfc;
 }
-.foot-title { font: 600 12px system-ui; color: #33383d; margin-bottom: 7px; }
-.foot-cmd { display: flex; align-items: stretch; gap: 6px; }
+.panel-foot summary { font: 600 12px system-ui; color: #33383d; cursor: pointer; }
+.foot-cmd { display: flex; align-items: stretch; gap: 6px; margin-top: 7px; }
 .foot-cmd code {
   flex: 1;
   min-width: 0;
@@ -286,6 +288,15 @@ a { color: #2a63b5; }
     background: #c9ced4; margin: 0 auto;
   }
   .panel-foot { display: none; } /* the install line lives in How it works */
+
+  /* T-031: no room for a second fixed rail beside a full-width bottom sheet —
+     fold Discover into the sheet's own scroll flow as one more section,
+     the known weakness of this edge-split layout versus the other two
+     designs it's being compared against. */
+  .rail {
+    position: static;
+    margin-top: 14px;
+  }
 }
 
 .loading-more {
@@ -312,6 +323,57 @@ a { color: #2a63b5; }
 
 @keyframes chat-blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
 .chat-cursor { animation: chat-blink 1s step-end infinite; }
+
+/* T-031: the whole Discover feature (.suggest below) now lives inside this
+   right-edge rail instead of stacked in the left panel. The rail element
+   itself is nested inside .panel-scroll in the markup — not a sibling of
+   .panel — specifically so the (min-width:721px) rule below can pull it out
+   to a fixed position on desktop while the (max-width:720px) override further
+   down leaves it in flow, folded into the bottom sheet as one more section.
+   A second independently-fixed panel has nowhere to go once .panel already
+   owns the full width of a narrow viewport — see the comment on the JSX. */
+.rail-toggle {
+  border: 1px solid #d6dbe0;
+  background: #fff;
+  border-radius: 6px;
+  width: 22px;
+  height: 22px;
+  line-height: 1;
+  cursor: pointer;
+  color: #4a5158;
+  font: 14px system-ui;
+  flex: none;
+}
+.rail-toggle:hover { background: #f1f3f5; }
+.rail .places-head { justify-content: space-between; }
+
+@media (min-width: 721px) {
+  .rail {
+    position: fixed;
+    top: 14px;
+    right: 14px;
+    width: 300px;
+    max-height: calc(100vh - 28px);
+    max-height: calc(100dvh - 28px);
+    overflow-y: auto;
+    background: #fff;
+    border: 1px solid #e3e6ea;
+    border-radius: 10px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
+    padding: 12px 14px 16px;
+    /* below the toast/offer/arrival banners (z-index 1100-1150), so a banner
+       centred over a narrow desktop window wins if the two ever overlap */
+    z-index: 1050;
+  }
+  .rail .suggest { border-top: none; padding-top: 0; margin-bottom: 0; }
+}
+
+/* Map-anchored click summary (T-031): the compact stand-in for the sidebar
+   result block that used to sit directly under the click, now that the full
+   detail lives back in the left panel. */
+.click-popup-wrap .leaflet-popup-content { margin: 10px 12px; }
+.click-popup-head { font: 600 12.5px system-ui; color: #23282d; margin-bottom: 6px; }
+.click-popup-chips { margin: 0; max-width: 240px; }
 
 /* "Where should I live" questionnaire (T-016). Sits between the ramp and
    the places section; class names follow the existing places/place-list
