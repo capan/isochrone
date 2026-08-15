@@ -484,6 +484,23 @@ export default function MapView() {
   const [clickSummary, setClickSummary] = useState<{ lat: number; lon: number } | null>(
     null
   );
+  // Whether the summary popup is the one currently on the map, tracked apart
+  // from clickSummary because the two answer different questions: clickSummary
+  // means "a click produced bands" and also gates the ramp legend, while this
+  // means "our popup is open right now". Conflating them made the popup effect
+  // reopen a popup the user had just dismissed as soon as any dependency
+  // changed, and steal the map back from a place popup they had opened since —
+  // Leaflet allows exactly one popup, so reopening ours closes theirs.
+  const summaryPopupRef = useRef<L.Popup | null>(null);
+  const summaryOpenRef = useRef(false);
+  // Which clickSummary the open popup belongs to, so a change of contents (a
+  // chip toggle, a profile switch, places arriving) updates it in place rather
+  // than tearing it down and opening a new one at the same spot. Compared by
+  // identity, not coordinates: clicks snap to a ~200m grid, so dismissing a
+  // popup and clicking roughly the same place again produces the same lat/lon,
+  // and a value comparison would decide nothing had changed and open nothing.
+  // Every successful draw hands us a fresh object, which is the honest signal.
+  const summarySourceRef = useRef<{ lat: number; lon: number } | null>(null);
   // Right rail defaults open; the toggle just gets it out of the way, it
   // never affects whether Discover has been used (suggestState still owns that).
   const [railOpen, setRailOpen] = useState(true);
@@ -1635,7 +1652,11 @@ export default function MapView() {
     const map = mapRef.current;
     if (!map) return;
     if (!clickSummary) {
-      map.closePopup();
+      // Close ours, not whatever happens to be open: map.closePopup() with no
+      // argument shuts the current popup, which after a click on a place in
+      // the list is theirs, not ours.
+      if (summaryPopupRef.current) map.closePopup(summaryPopupRef.current);
+      summarySourceRef.current = null;
       return;
     }
     const { lat, lon } = clickSummary;
@@ -1692,10 +1713,27 @@ export default function MapView() {
       wrap.appendChild(chips);
     }
 
-    L.popup({ className: "click-popup-wrap", autoPan: false })
+    // A new click opens a popup. Anything else — chips, profile, places
+    // arriving — only refreshes the one already open, and does nothing at all
+    // if it is not: the user either dismissed it or is reading a different one,
+    // and re-opening over that is how this effect used to discard both.
+    if (clickSummary === summarySourceRef.current) {
+      if (summaryOpenRef.current) summaryPopupRef.current?.setContent(wrap);
+      return;
+    }
+
+    const popup = L.popup({ className: "click-popup-wrap", autoPan: false })
       .setLatLng([lat, lon])
-      .setContent(wrap)
-      .openOn(map);
+      .setContent(wrap);
+    // "remove" fires however it closes — the ×, Escape, or Leaflet swapping in
+    // somebody else's popup — so the flag cannot drift from what is on screen.
+    popup.on("remove", () => {
+      if (summaryPopupRef.current === popup) summaryOpenRef.current = false;
+    });
+    summaryPopupRef.current = popup;
+    summarySourceRef.current = clickSummary;
+    summaryOpenRef.current = true;
+    popup.openOn(map);
     // profile is in here because the heading names it; without it the popup
     // kept the wording from whichever profile was active when it opened.
   }, [clickSummary, places, groups, kindFilter, shownMinutes, profile]);
@@ -1872,7 +1910,9 @@ export default function MapView() {
               section instead of needing a second fixed panel that would not
               fit next to it. Known weakness of this design, being compared
               against two alternative layouts on separate branches. */}
-          <aside className={`rail${railOpen ? "" : " rail-closed"}`}>
+          {/* No collapsed-state class: the rail's body is conditionally
+              rendered below, so there is nothing for CSS to hide. */}
+          <aside className="rail">
             <section className="suggest">
               <div className="places-head">
                 <h2>Where should I live?</h2>
