@@ -3,6 +3,32 @@
    made #root shrink-to-fit, so the sidebar kept its 330px and the map pane
    resolved to zero width; and its dark `color-scheme` painted white text on
    the white panel. Replaced with the little this app actually needs. */
+/* T-032: the type scale and the text-grey palette, named by role rather than
+   number, so the next addition picks a role instead of inventing a tenth
+   size or a ninth grey. Four steps collapse what had drifted to nine sizes
+   (10.5/11/11.5/12/12.5/13/14/16/18) a pixel apart at a time; three greys
+   collapse eight, all three re-checked against a white background:
+   primary ~14.6:1, secondary ~8.0:1, tertiary ~4.8:1 (the floor — anything
+   lighter fell under WCAG AA's 4.5:1 for normal text). The size and weight
+   are separate custom properties, not one `font:` shorthand var, so a bare
+   `font-size` declaration can pull in just the size without the shorthand's
+   side effect of resetting line-height to `normal` — several rules here
+   rely on inheriting .app's 1.45. */
+:root {
+  --fs-title: 16px;   /* panel title only */
+  --fw-title: 600;
+  --fs-heading: 14px; /* section headings */
+  --fw-heading: 600;
+  --fs-body: 13px;    /* body copy, list rows, controls */
+  --fw-body: 400;
+  --fs-meta: 11.5px;  /* counts, arrival times, scale ends, captions */
+  --fw-meta: 400;
+
+  --text-primary: #23282d;   /* ~14.6:1 on white */
+  --text-secondary: #4a5158; /* ~8.0:1 on white */
+  --text-tertiary: #6b7280;  /* ~4.8:1 on white — the floor, nothing lighter */
+}
+
 * { box-sizing: border-box; }
 
 html, body, #root {
@@ -12,7 +38,7 @@ html, body, #root {
 
 body {
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  color: #23282d;
+  color: var(--text-primary);
   background: #fff;
   -webkit-font-smoothing: antialiased;
 }
@@ -49,8 +75,8 @@ a { color: #2a63b5; }
   border: none;
   box-shadow: none;
   color: #fff;
-  font: 11px system-ui;
-  padding: 2px 6px;
+  font: var(--fs-meta) system-ui;
+  padding: 2px 8px;
 }
 .leaflet-tooltip.area-label::before {
   display: none;
@@ -71,8 +97,8 @@ a { color: #2a63b5; }
   border-radius: 9px;
   cursor: pointer;
   padding: 8px 12px;
-  font: 13px system-ui;
-  color: #33383d;
+  font: var(--fs-body) system-ui;
+  color: var(--text-secondary);
   background: rgba(255, 255, 255, 0.94);
   box-shadow: 0 1px 5px rgba(0, 0, 0, 0.28);
 }
@@ -89,7 +115,7 @@ a { color: #2a63b5; }
   width: 100%;
   height: 100vh;
   height: 100dvh; /* phones: avoid the address bar eating the sheet */
-  font: 13px/1.45 system-ui;
+  font: var(--fs-body)/1.45 system-ui;
 }
 .map-wrap { position: relative; flex: 1; min-width: 0; }
 #map { position: absolute; inset: 0; }
@@ -134,49 +160,53 @@ a { color: #2a63b5; }
   display: flex;
   flex-direction: column;
   background: #fff;
-  border-right: 1px solid #e3e6ea;
+  /* T-032: a hairline shadow instead of a flat 1px border — still one pixel
+     of separation from the map, but softer than a ruled line. */
+  box-shadow: 1px 0 0 rgba(35, 40, 45, 0.08);
   z-index: 1200;
 }
-.panel-scroll { overflow-y: auto; padding: 14px 14px 18px; }
+.panel-scroll { overflow-y: auto; padding: 16px 16px 20px; }
 .sheet-handle { display: none; }
 
 .panel-head { display: flex; align-items: baseline; justify-content: space-between; }
-.panel-head h1 { margin: 0; font: 600 16px system-ui; }
+.panel-head h1 { margin: 0; font: var(--fw-title) var(--fs-title) system-ui; }
 .linkish {
   border: none; background: none; padding: 0; cursor: pointer;
-  color: #2a63b5; font: 12px system-ui; text-decoration: underline;
+  color: #2a63b5; font: var(--fs-body) system-ui; text-decoration: underline;
 }
 
 /* place search. type="search" for the browser's own clear button. */
-.search { display: flex; gap: 6px; margin-top: 10px; }
+.search { display: flex; gap: 6px; margin-top: 12px; }
 .search input {
   flex: 1; min-width: 0; border: 1px solid #dfe3e8; border-radius: 7px;
-  padding: 6px 9px; font: 13px system-ui;
+  padding: 8px 8px; font: var(--fs-body) system-ui;
 }
 .search button {
   flex: none; border: 1px solid #d6dbe0; border-radius: 7px; background: #fff;
-  cursor: pointer; padding: 0 11px; font: 12px system-ui; color: #4a5158;
+  cursor: pointer; padding: 0 12px; font: var(--fs-body) system-ui; color: var(--text-secondary);
 }
 .search button:hover:not(:disabled) { background: #f1f3f5; }
 .search button:disabled { opacity: 0.5; cursor: default; }
 
+/* T-032: outer border dropped — the row dividers below already carry the
+   grouping, and a container line around them was redundant with it. */
 .results {
   list-style: none; margin: 8px 0 0; padding: 0;
-  border: 1px solid #e6e9ec; border-radius: 7px; overflow: hidden;
+  border-radius: 7px; overflow: hidden;
 }
 .results li + li { border-top: 1px solid #f2f4f6; }
 .results button {
   width: 100%; text-align: left; border: none; background: none;
-  cursor: pointer; padding: 7px 9px; font: 12px/1.4 system-ui; color: #33383d;
+  cursor: pointer; padding: 8px 8px; font: var(--fs-body)/1.4 system-ui; color: var(--text-secondary);
 }
 .results button:hover { background: #f7f9fb; }
 
 /* profile segmented control */
-.seg { display: flex; gap: 2px; margin: 12px 0 10px; background: #f1f3f5; padding: 3px; border-radius: 9px; }
+.seg { display: flex; gap: 2px; margin: 12px 0 12px; background: #f1f3f5; padding: 3px; border-radius: 9px; }
 .seg button {
   flex: 1; display: flex; align-items: center; justify-content: center; gap: 4px;
   border: none; background: none; border-radius: 7px; cursor: pointer;
-  padding: 6px 4px; font: 12px system-ui; color: #33383d;
+  padding: 8px 4px; font: var(--fs-body) system-ui; color: var(--text-secondary);
 }
 .seg button[aria-pressed="true"] {
   background: #dbe8fa; color: #12447f; font-weight: 600;
@@ -186,26 +216,32 @@ a { color: #2a63b5; }
 .ramp { margin-bottom: 12px; }
 .ramp-bar { display: flex; }
 .ramp-bar i { flex: 1; height: 9px; }
-.ramp-scale { display: flex; justify-content: space-between; color: #6b7280; font-size: 11px; }
-.heat-legend-note { margin-top: 4px; font-size: 11.5px; }
+.ramp-scale { display: flex; justify-content: space-between; color: var(--text-tertiary); font-size: var(--fs-meta); }
+.heat-legend-note { margin-top: 4px; font-size: var(--fs-meta); }
 
 /* Blocky, not smoothed: each pixel is a real measurement (~163m x 267m on
    the ground), and browser smoothing would invent gradient between cells
    that were never measured, and halo where transparent no-data meets colour. */
 .heat-overlay { image-rendering: pixelated; }
 
-.hint { color: #5b6470; margin: 0 0 12px; }
-.muted { color: #8b929a; margin: 6px 0; }
+.hint { color: var(--text-tertiary); margin: 0 0 12px; }
+.muted { color: var(--text-tertiary); margin: 8px 0; }
 
 /* places */
-.places-head { display: flex; align-items: center; gap: 7px; border-top: 1px solid #eceef1; padding-top: 12px; }
-.places-head h2 { margin: 0; font: 600 13px system-ui; }
-.count { background: #eef1f4; border-radius: 10px; padding: 1px 7px; color: #5b6470; font-size: 11px; }
+/* T-032: border-top dropped in favour of margin — the section break now
+   reads as a gap, not a ruled line. */
+.places-head { display: flex; align-items: center; gap: 7px; margin-top: 16px; }
+.places-head h2 { margin: 0; font: var(--fw-heading) var(--fs-heading) system-ui; }
+/* T-032: sits on a light grey chip, not white — #5b6470 (now the tertiary
+   token everywhere else) measures ~4.26:1 there, under the 4.5:1 floor, so
+   this one stays on the secondary token (~7.1:1 on #eef1f4) instead of
+   following the rest of that hex's mapping. */
+.count { background: #eef1f4; border-radius: 10px; padding: 1px 8px; color: var(--text-secondary); font-size: var(--fs-meta); }
 
-.chips { display: flex; flex-wrap: wrap; gap: 5px; margin: 9px 0; }
+.chips { display: flex; flex-wrap: wrap; gap: 5px; margin: 8px 0; }
 .chips button {
   border: 1px solid #dfe3e8; background: #fff; border-radius: 20px;
-  padding: 4px 10px; cursor: pointer; font: 12px system-ui; color: #4a5158;
+  padding: 4px 12px; cursor: pointer; font: var(--fs-body) system-ui; color: var(--text-secondary);
 }
 .chips button[aria-pressed="true"] { background: #12447f; border-color: #12447f; color: #fff; }
 
@@ -214,43 +250,43 @@ a { color: #2a63b5; }
 .place-list button {
   width: 100%; display: flex; gap: 10px; align-items: baseline;
   border: none; background: none; cursor: pointer; text-align: left;
-  padding: 7px 4px; font: inherit;
+  padding: 8px 4px; font: inherit;
 }
 .place-list button:hover { background: #f7f9fb; }
 .pl-min { color: #12447f; font-weight: 600; font-variant-numeric: tabular-nums; flex: none; min-width: 34px; }
 .pl-body { display: flex; flex-direction: column; min-width: 0; }
-.pl-name { color: #23282d; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pl-kind { color: #8b929a; font-size: 11px; }
+.pl-name { color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pl-kind { color: var(--text-tertiary); font-size: var(--fs-meta); }
 
 /* Evidence that people add areas — the importer is otherwise invisible
    unless you happen to pan somewhere dark. Demoted (T-031) behind a native
    <details>, collapsed by default — HelpPanel already uses this pattern. */
-.recent { border-top: 1px solid #eceef1; margin-top: 14px; padding-top: 12px; }
-.recent summary { margin: 0 0 6px; font: 600 13px system-ui; color: #33383d; cursor: pointer; }
+.recent { border-top: 1px solid #eceef1; margin-top: 16px; padding-top: 12px; }
+.recent summary { margin: 0 0 8px; font: var(--fw-heading) var(--fs-heading) system-ui; color: var(--text-secondary); cursor: pointer; }
 .recent ul { list-style: none; margin: 0; padding: 0; }
 .recent li + li { border-top: 1px solid #f2f4f6; }
 .recent button {
   width: 100%; display: flex; justify-content: space-between; gap: 8px;
   align-items: baseline; border: none; background: none; cursor: pointer;
-  text-align: left; padding: 6px 4px; font: 12px system-ui; color: #33383d;
+  text-align: left; padding: 8px 4px; font: var(--fs-body) system-ui; color: var(--text-secondary);
 }
 .recent button:hover { background: #f7f9fb; }
 .re-where { font-variant-numeric: tabular-nums; }
-.re-when { color: #8b929a; font-size: 11px; white-space: nowrap; flex: none; }
+.re-when { color: var(--text-tertiary); font-size: var(--fs-meta); white-space: nowrap; flex: none; }
 .re-mine { color: #7c4dff; }
 
 /* The install line used to wrap mid-word into a grey smear. Now it is a
    proper block: one scrollable line plus a copy button, so it never breaks.
    Demoted (T-031) behind a native <details>, collapsed by default. */
 .panel-foot {
-  margin-top: 18px;
-  padding: 10px 11px;
+  margin-top: 20px;
+  padding: 12px 12px;
   border: 1px solid #e6e9ec;
   border-radius: 8px;
   background: #fafbfc;
 }
-.panel-foot summary { font: 600 12px system-ui; color: #33383d; cursor: pointer; }
-.foot-cmd { display: flex; align-items: stretch; gap: 6px; margin-top: 7px; }
+.panel-foot summary { font: var(--fw-heading) var(--fs-body) system-ui; color: var(--text-secondary); cursor: pointer; }
+.foot-cmd { display: flex; align-items: stretch; gap: 6px; margin-top: 8px; }
 .foot-cmd code {
   flex: 1;
   min-width: 0;
@@ -259,9 +295,9 @@ a { color: #2a63b5; }
   background: #fff;
   border: 1px solid #e6e9ec;
   border-radius: 5px;
-  padding: 5px 7px;
-  font: 10.5px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: #4a5158;
+  padding: 5px 8px;
+  font: var(--fs-meta)/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-secondary);
   user-select: all;
 }
 .foot-cmd code::-webkit-scrollbar { height: 4px; }
@@ -272,33 +308,33 @@ a { color: #2a63b5; }
   border-radius: 5px;
   background: #fff;
   cursor: pointer;
-  padding: 0 9px;
-  font: 11px system-ui;
-  color: #4a5158;
+  padding: 0 8px;
+  font: var(--fs-meta) system-ui;
+  color: var(--text-secondary);
 }
 .foot-cmd button:hover { background: #f1f3f5; }
-.panel-foot .linkish { margin-top: 8px; font-size: 11.5px; }
+.panel-foot .linkish { margin-top: 8px; font-size: var(--fs-meta); }
 
 /* floating bits that stay over the map */
 .floating {
   position: absolute; left: 50%; transform: translateX(-50%); z-index: 1100;
   background: rgba(255,255,255,0.96); box-shadow: 0 2px 6px rgba(0,0,0,0.3);
-  display: flex; align-items: center; gap: 9px; font: 13px system-ui;
+  display: flex; align-items: center; gap: 9px; font: var(--fs-body) system-ui;
 }
-.offer { top: 12px; padding: 9px 13px; border-radius: 4px; }
-.arrival { top: 12px; padding: 7px 8px 7px 13px; border-radius: 20px; max-width: 92%; font-size: 12px; }
+.offer { top: 12px; padding: 8px 13px; border-radius: 4px; }
+.arrival { top: 12px; padding: 8px 8px 8px 13px; border-radius: 20px; max-width: 92%; font-size: var(--fs-body); }
 .arrival .dismiss {
-  border: none; background: none; cursor: pointer; color: #868e96;
-  font-size: 16px; line-height: 1; padding: 0 5px;
+  border: none; background: none; cursor: pointer; color: var(--text-tertiary);
+  font-size: var(--fs-title); line-height: 1; padding: 0 5px;
 }
-.offer button { font: 13px system-ui; padding: 5px 10px; cursor: pointer; }
-.progress { bottom: 14px; padding: 7px 12px; border-radius: 20px; color: #33383d; font-size: 12px; }
+.offer button { font: var(--fs-body) system-ui; padding: 5px 12px; cursor: pointer; }
+.progress { bottom: 14px; padding: 8px 12px; border-radius: 20px; color: var(--text-secondary); font-size: var(--fs-body); }
 .toast {
   position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 1150;
-  max-width: 80vw; background: #b3261e; color: #fff; padding: 8px 14px;
-  border-radius: 4px; font: 13px system-ui; box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+  max-width: 80vw; background: #b3261e; color: #fff; padding: 8px 16px;
+  border-radius: 4px; font: var(--fs-body) system-ui; box-shadow: 0 2px 6px rgba(0,0,0,0.3);
 }
-.leaflet-popup.place-popup .leaflet-popup-content { margin: 9px 12px; font: 12px system-ui; }
+.leaflet-popup.place-popup .leaflet-popup-content { margin: 9px 12px; font: var(--fs-body) system-ui; }
 
 /* ---- phones: the panel becomes a bottom sheet ------------------------- */
 @media (max-width: 720px) {
@@ -306,16 +342,22 @@ a { color: #2a63b5; }
   .map-wrap { flex: 1; }
   .panel {
     position: fixed; left: 0; right: 0; bottom: 0; width: auto;
-    max-height: 78dvh; border-right: none; border-top: 1px solid #e3e6ea;
+    max-height: 78dvh; border-top: 1px solid #e3e6ea;
     border-radius: 14px 14px 0 0; box-shadow: 0 -3px 16px rgba(0,0,0,0.22);
-    transform: translateY(calc(100% - 116px)); /* collapsed: profiles peek out */
+    /* Collapsed height, calibrated so the profile picker peeks out whole. Was
+       116px; T-032's larger tap targets grew the handle/search/picker stack by
+       a measured ~11px, which clipped the bottom of that row, so this follows
+       it up to the next step on the 4px rhythm. Calculated from the CSS
+       deltas, not observed — if the row looks cropped or the sheet sits too
+       tall at phone width, this constant is the one to move. */
+    transform: translateY(calc(100% - 128px));
     transition: transform 0.22s ease;
   }
   .panel.open { transform: translateY(0); }
   .panel-scroll { max-height: 78dvh; }
   .sheet-handle {
     display: block; width: 100%; border: none; background: none;
-    padding: 9px 0 3px; cursor: pointer;
+    padding: 8px 0 3px; cursor: pointer;
   }
   .sheet-handle span {
     display: block; width: 38px; height: 4px; border-radius: 3px;
@@ -329,14 +371,14 @@ a { color: #2a63b5; }
      designs it's being compared against. */
   .rail {
     position: static;
-    margin-top: 14px;
+    margin-top: 16px;
   }
 }
 
 .loading-more {
-  color: #8b929a;
-  font-size: 11px;
-  padding: 9px 4px;
+  color: var(--text-tertiary);
+  font-size: var(--fs-meta);
+  padding: 8px 4px;
   text-align: center;
 }
 
@@ -346,7 +388,7 @@ a { color: #2a63b5; }
   background: rgba(0, 0, 0, 0.08);
   border-radius: 9px;
   padding: 0 5px;
-  font-size: 10.5px;
+  font-size: var(--fs-meta);
   font-variant-numeric: tabular-nums;
 }
 .chips button[aria-pressed="true"] .chip-n { background: rgba(255, 255, 255, 0.25); }
@@ -374,8 +416,8 @@ a { color: #2a63b5; }
   height: 22px;
   line-height: 1;
   cursor: pointer;
-  color: #4a5158;
-  font: 14px system-ui;
+  color: var(--text-secondary);
+  font: var(--fs-heading) system-ui;
   flex: none;
 }
 .rail-toggle:hover { background: #f1f3f5; }
@@ -394,7 +436,7 @@ a { color: #2a63b5; }
     border: 1px solid #e3e6ea;
     border-radius: 10px;
     box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
-    padding: 12px 14px 16px;
+    padding: 12px 16px 16px;
     /* below the toast/offer/arrival banners (z-index 1100-1150), so a banner
        centred over a narrow desktop window wins if the two ever overlap */
     z-index: 1050;
@@ -410,8 +452,12 @@ a { color: #2a63b5; }
    in the popup's top-right corner and was overlapping the last word of the
    heading — reported on "…places within reach" with the × sitting on the h. */
 .click-popup-head {
-  font: 600 12.5px system-ui;
-  color: #23282d;
+  /* T-032: kept at body size rather than promoted to the heading step (14px),
+     and its spacing left untouched — the map popup is a hard "nothing moves"
+     constraint, and padding-right is tuned to clear Leaflet's close button.
+     Bold stays, so it still reads as the popup's heading. */
+  font: var(--fw-heading) var(--fs-body) system-ui;
+  color: var(--text-primary);
   margin-bottom: 6px;
   padding-right: 18px;
 }
@@ -420,21 +466,24 @@ a { color: #2a63b5; }
 /* "Where should I live" questionnaire (T-016). Sits between the ramp and
    the places section; class names follow the existing places/place-list
    naming so the panel reads as part of the same family, not a bolt-on. */
-.suggest { border-top: 1px solid #eceef1; padding-top: 12px; margin-bottom: 14px; }
-.suggest-honesty { margin-top: 4px; font-size: 11.5px; }
+.suggest { border-top: 1px solid #eceef1; padding-top: 12px; margin-bottom: 16px; }
+.suggest-honesty { margin-top: 4px; font-size: var(--fs-meta); }
 
-.suggest-q { margin-top: 10px; }
-.suggest-q-label { font: 600 12px system-ui; color: #33383d; margin-bottom: 4px; }
+.suggest-q { margin-top: 12px; }
+/* T-032: kept at body size (not the heading step) — this labels one field
+   inside a stack of questions, not a section; bold alone keeps it legible
+   as a label without competing with the modal's own h2. */
+.suggest-q-label { font: var(--fw-heading) var(--fs-body) system-ui; color: var(--text-secondary); margin-bottom: 4px; }
 /* .seg already carries the segmented-button chrome (index.css); reused as-is
    for each question's options, not restyled here. */
 
-.suggest-results { margin-top: 10px; border-top: 1px solid #eceef1; padding-top: 4px; }
+.suggest-results { margin-top: 12px; border-top: 1px solid #eceef1; padding-top: 4px; }
 .suggest-rank {
   min-width: 26px;
   color: #7c4dff; /* the "recently added / mine" accent, reused for rank */
 }
-.suggest-layers { display: flex; flex-wrap: wrap; gap: 4px 8px; font-size: 11px; }
-.suggest-layer { color: #8b929a; }
+.suggest-layers { display: flex; flex-wrap: wrap; gap: 4px 8px; font-size: var(--fs-meta); }
+.suggest-layer { color: var(--text-tertiary); }
 /* The negative signal — "no pharmacy in 30 min" — is the strongest claim the
    feature makes, so it is not styled to disappear: red, not grey. */
 .suggest-miss { color: #b3261e; }
@@ -447,9 +496,9 @@ a { color: #2a63b5; }
   background: #12447f;
   color: #fff;
   border-radius: 8px;
-  padding: 9px 12px;
+  padding: 8px 12px;
   cursor: pointer;
-  font: 600 12.5px system-ui;
+  font: var(--fw-heading) var(--fs-body) system-ui;
 }
 .discover-btn:hover { background: #0e3766; }
 
@@ -462,8 +511,8 @@ a { color: #2a63b5; }
 }
 .suggest-summary-text {
   margin: 0;
-  color: #33383d;
-  font-size: 12px;
+  color: var(--text-secondary);
+  font-size: var(--fs-body);
   flex: 1;
   min-width: 0;
 }
@@ -473,7 +522,7 @@ a { color: #2a63b5; }
    #1..#10 claimed an order the data does not support. */
 .suggest-tie-note {
   margin: 0 0 8px;
-  font-size: 12px;
+  font-size: var(--fs-body);
 }
 
 /* Ten two-line results pushed "Places within reach" off the bottom of the
@@ -487,7 +536,7 @@ a { color: #2a63b5; }
 
 /* One clause of caveat (bike/one-way) or the dog→greenspace disclosure —
    both sit right under the buttons that triggered them, not tucked away. */
-.suggest-note { margin: 4px 0 0; font-size: 11px; }
+.suggest-note { margin: 4px 0 0; font-size: var(--fs-meta); }
 
 .suggest-modal-backdrop {
   position: fixed;
@@ -501,13 +550,13 @@ a { color: #2a63b5; }
 }
 .suggest-modal {
   background: #fff;
-  color: #23282d;
+  color: var(--text-primary);
   border-radius: 10px;
   max-width: 420px;
   width: 100%;
   max-height: 85vh;
   overflow-y: auto;
-  padding: 18px 20px 20px;
+  padding: 20px 20px 20px;
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.3);
 }
 /* The dialog takes programmatic focus on open, which should not paint a ring —
@@ -519,27 +568,31 @@ a { color: #2a63b5; }
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
 }
-.suggest-modal-head h2 { margin: 0; font: 600 16px system-ui; }
+.suggest-modal-head h2 { margin: 0; font: var(--fw-title) var(--fs-title) system-ui; }
 .suggest-modal-head button {
   border: none;
   background: transparent;
-  font: 18px system-ui;
+  /* Not the modal's heading (that's the h2 above) — the × close glyph, at
+     18px in the original nine-size set with no obvious nearest step of its
+     own; snapped to the title step since it sits in the same header row as
+     one and 16px reads fine for a glyph. */
+  font: var(--fs-title) system-ui;
   cursor: pointer;
-  color: #9aa1a9;
+  color: var(--text-tertiary);
   line-height: 1;
   padding: 0;
 }
 .suggest-submit {
   width: 100%;
-  margin-top: 14px;
+  margin-top: 16px;
   border: none;
   background: #12447f;
   color: #fff;
   border-radius: 8px;
-  padding: 10px 12px;
+  padding: 12px 12px;
   cursor: pointer;
-  font: 600 13px system-ui;
+  font: var(--fw-heading) var(--fs-body) system-ui;
 }
 .suggest-submit:hover { background: #0e3766; }

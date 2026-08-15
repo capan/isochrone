@@ -2466,7 +2466,7 @@ app.get("/api/isochrone", async (req: any, res: any) => {
           error: "no street nearby",
           detail:
             `This area is imported, but the nearest walkable street is ` +
-            `${Math.round(row.dist_m)}m away — farther than the ${MAX_SNAP_M}m ` +
+            `${Math.round(row.dist_m)}m away, past the ${MAX_SNAP_M}m ` +
             `snapping limit. Click closer to a road or path.`,
         });
       }
@@ -2489,7 +2489,7 @@ app.get("/api/isochrone", async (req: any, res: any) => {
           row.dist_m / 1000
         )}km away. This point is served by ${schema}, whose graph spans ${await getGraphExtent(
           schema
-        )} — a bounding rectangle, not the shape that routes. POST /api/areas with a bbox to import coverage here.`,
+        )}, a bounding rectangle rather than the shape that routes. POST /api/areas with a bbox to import coverage here.`,
       });
     }
     vertexId = row.id;
