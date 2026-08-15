@@ -62,6 +62,14 @@ services:
       # this stack's rsync --delete deploy never touches. Local dev uses the
       # tracked empty ./caddy-sites, so the import just matches nothing.
       - ${CADDY_SITES_DIR:-./caddy-sites}:/etc/caddy/sites:ro
+      # Static files for the personal site, which capan/huseyincapan.dev owns
+      # end to end: its repo ships the site block into the sites dir above and
+      # rsyncs the built files into SITE_ROOT_DIR on the host. This stack only
+      # has to make them visible inside the container. Read-only because Caddy
+      # serves them and never writes; the host-side rsync is what writes.
+      # Env-defaulted like CADDY_SITES_DIR so a Mac mounts the tracked empty
+      # ./caddy-sites rather than an /opt path that does not exist there.
+      - ${SITE_ROOT_DIR:-./caddy-sites}:/srv/site:ro
       - caddydata:/data
       - caddyconfig:/config
     ports:
