@@ -28,6 +28,19 @@ const PROFILE_ICONS: Record<string, string> = {
   bike: "🚲",
 };
 
+// How to say "a trip of N minutes" for each profile. The click popup hardcoded
+// "walk" and kept saying it with bike selected — reported against a screenshot
+// reading "10 min walk" beneath a lit-up bike pill, with the minutes and the
+// counts already correct. One verb cannot cover all four without being wrong
+// ("walk" for bike) or presumptuous ("roll" for wheelchair), so each gets its
+// own phrase.
+const PROFILE_TRIP: Record<string, string> = {
+  walk: "on foot",
+  stroller: "with a stroller",
+  wheelchair: "by wheelchair",
+  bike: "by bike",
+};
+
 // Sequential single-hue ramp, light→dark = near→far. Starts at step 250, the
 // lightest that still clears contrast against the basemap.
 const RAMP = [
@@ -775,21 +788,38 @@ export default function MapView() {
       }
     };
 
-    // Suggestion markers: styled entirely through circleMarker options (no
-    // CSS class), so "best clearly distinguished" holds regardless of
-    // stylesheet — rank 1 is bigger and amber, the rest are smaller and blue.
+    // Suggestion markers carry their rank. The panel lists them 1..10 and the
+    // map drew ten identical dots, so matching a result to its pin meant
+    // hovering each one — reported with a screenshot of the plain blue dots.
+    // divIcon rather than circleMarker because a circle cannot hold text; the
+    // styling stays inline for the reason the circles did, so "best clearly
+    // distinguished" survives regardless of the stylesheet — rank 1 is bigger
+    // and amber, the rest smaller and blue. The only interpolated value is the
+    // loop index, which is ours; the area's name stays a text node in the
+    // tooltip below, because Nominatim's text is not ours to render as markup.
     suggestLayerRef.current = L.layerGroup().addTo(map);
     drawSuggestRef.current = (cells: SuggestCell[]) => {
       const g = suggestLayerRef.current;
       if (!g) return;
       g.clearLayers();
       cells.forEach((c, i) => {
-        L.circleMarker([c.lat, c.lon], {
-          radius: i === 0 ? 12 : 8,
-          weight: 2,
-          color: "#fff",
-          fillColor: i === 0 ? "#ffb703" : "#3a86ff",
-          fillOpacity: 0.92,
+        const best = i === 0;
+        const d = best ? 26 : 21;
+        L.marker([c.lat, c.lon], {
+          icon: L.divIcon({
+            // Empty, not omitted: Leaflet's default divIcon class paints a
+            // white box behind the pin.
+            className: "",
+            iconSize: [d, d],
+            iconAnchor: [d / 2, d / 2],
+            html:
+              `<div style="width:${d}px;height:${d}px;border-radius:50%;` +
+              `background:${best ? "#ffb703" : "#3a86ff"};` +
+              `border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,.35);` +
+              `color:#fff;font:700 ${best ? 13 : 11}px system-ui;` +
+              `display:flex;align-items:center;justify-content:center;` +
+              `box-sizing:border-box;">${i + 1}</div>`,
+          }),
         })
           // The name, not the score: "100% match" on ten pins is noise, and the
           // pin's own position already says where it is. DOM node rather than a
@@ -1562,7 +1592,9 @@ export default function MapView() {
 
     const head = document.createElement("div");
     head.className = "click-popup-head";
-    head.textContent = `${shownMinutes} min walk · ${places.length.toLocaleString()} places within reach`;
+    head.textContent = `${shownMinutes} min ${
+      PROFILE_TRIP[profile] ?? profile
+    } · ${places.length.toLocaleString()} places within reach`;
     wrap.appendChild(head);
 
     if (groups.length) {
@@ -1611,7 +1643,9 @@ export default function MapView() {
       .setLatLng([lat, lon])
       .setContent(wrap)
       .openOn(map);
-  }, [clickSummary, places, groups, kindFilter, shownMinutes]);
+    // profile is in here because the heading names it; without it the popup
+    // kept the wording from whichever profile was active when it opened.
+  }, [clickSummary, places, groups, kindFilter, shownMinutes, profile]);
 
   return (
     <div className="app">

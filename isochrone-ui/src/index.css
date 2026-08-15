@@ -372,7 +372,15 @@ a { color: #2a63b5; }
    result block that used to sit directly under the click, now that the full
    detail lives back in the left panel. */
 .click-popup-wrap .leaflet-popup-content { margin: 10px 12px; }
-.click-popup-head { font: 600 12.5px system-ui; color: #23282d; margin-bottom: 6px; }
+/* padding-right clears Leaflet's close button, which is absolutely positioned
+   in the popup's top-right corner and was overlapping the last word of the
+   heading — reported on "…places within reach" with the × sitting on the h. */
+.click-popup-head {
+  font: 600 12.5px system-ui;
+  color: #23282d;
+  margin-bottom: 6px;
+  padding-right: 18px;
+}
 .click-popup-chips { margin: 0; max-width: 240px; }
 
 /* "Where should I live" questionnaire (T-016). Sits between the ramp and
