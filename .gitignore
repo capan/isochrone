@@ -28,5 +28,6 @@ CLAUDE.md
 .claude/
 
 # Caddy access logs: the directory is tracked for the local mount, the logs are not.
+# Log files land here locally; only the mount-point dir itself is tracked.
 caddy-logs/*
-!caddy-logs/README.md
+!caddy-logs/.gitkeep
