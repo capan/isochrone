@@ -1866,7 +1866,7 @@ export default function MapView() {
             {placesState === "pending" && (
               <p className="muted">
                 Streets are imported here, but the amenities haven't arrived
-                yet. They are still being fetched — check back shortly.
+                yet. They are still being fetched. Check back shortly.
               </p>
             )}
             {placesState === "idle" && !places.length && (
@@ -1930,7 +1930,7 @@ export default function MapView() {
               {railOpen && (
                 <>
                   <p className="muted suggest-honesty">
-                    Ranks reachability only — not rent, not noise, not transit.
+                    Ranks reachability only. Not rent, not noise, not transit.
                   </p>
 
                   {suggestState === "idle" ? (
@@ -1972,7 +1972,7 @@ export default function MapView() {
                       )}
                       {suggestState === "error" && (
                         <p className="suggest-miss">
-                          Could not reach the server — this is not a result, try again.
+                          Could not reach the server. This is not a result, so try again.
                         </p>
                       )}
 
@@ -1980,7 +1980,7 @@ export default function MapView() {
                         <>
                           <p className="muted suggest-tie-note">
                             {scoresAreTied(suggestCells)
-                              ? `${suggestCells.length} areas, all equally close to what you picked — they are alternatives, not a ranking.`
+                              ? `${suggestCells.length} areas, all equally close to what you picked. They are alternatives, not a ranking.`
                               : `${suggestCells.length} areas, best first.`}
                           </p>
                           <ul className="place-list suggest-results">
@@ -2275,7 +2275,7 @@ function SuggestModal({
           </button>
         </div>
         <p className="muted suggest-honesty">
-          Ranks reachability only — not rent, not noise, not transit.
+          Ranks reachability only. Not rent, not noise, not transit.
         </p>
 
         {SUGGEST_QUESTIONS.map((q) => (
