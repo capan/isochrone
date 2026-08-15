@@ -1021,6 +1021,16 @@ export default function MapView() {
       // once the data is actually in hand.
       const gen = ++drawGenRef.current;
 
+      // This function owns lastClickRef. It used to be stamped by each caller
+      // instead — the map click, the deep link, the search result — and
+      // focusSuggestion, which calls straight in here, was the one that never
+      // did. So after clicking a ranked suggestion the profile picker's redraw
+      // had either a stale coordinate or none at all, and switching walk→bike
+      // did nothing whatsoever. Reported from the edge-split branch. Setting it
+      // where every path already converges is also what makes the comment in
+      // focusSuggestion true rather than aspirational.
+      lastClickRef.current = [lat, lng];
+
       // pin the origin — the lightest band alone doesn't read as "you are
       // here". circleMarker, not marker: default icon PNGs don't survive vite.
       if (markerRef.current) {
@@ -1125,7 +1135,6 @@ export default function MapView() {
     const debouncedUpdate = debounce((lat: number, lng: number) => {
       const snappedLat = parseFloat(snap(lat).toFixed(5));
       const snappedLng = parseFloat(snap(lng).toFixed(5));
-      lastClickRef.current = [snappedLat, snappedLng];
       updateIsochrones(snappedLat, snappedLng);
     }, 600);
 
@@ -1144,7 +1153,6 @@ export default function MapView() {
 
     if (!isNaN(urlLat) && !isNaN(urlLon)) {
       map.setView([urlLat, urlLon], 14);
-      lastClickRef.current = [urlLat, urlLon];
       updateIsochrones(urlLat, urlLon);
     }
 
@@ -1339,7 +1347,6 @@ export default function MapView() {
     // done its job, and it shares the top strip with the import offer.
     setArrival(false);
     map.setView([r.lat, r.lon], 14);
-    lastClickRef.current = [r.lat, r.lon];
     updateRef.current(r.lat, r.lon);
     if (window.innerWidth <= 720) setPanelOpen(false);
   };
