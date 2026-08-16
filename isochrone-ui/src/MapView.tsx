@@ -1981,7 +1981,16 @@ export default function MapView() {
                           <p className="muted suggest-tie-note">
                             {scoresAreTied(suggestCells)
                               ? `${suggestCells.length} areas, all equally close to what you picked. They are alternatives, not a ranking.`
-                              : `${suggestCells.length} areas, best first.`}
+                              : `${suggestCells.length} areas, best first.`}{" "}
+                            {/* The only spatial rule is REACH_SPREAD_METERS — a 700 m
+                                minimum gap so ten adjacent cells in one blob do not
+                                fill the list. Nothing pushes results apart beyond
+                                that, so two neighbours and one across town is the
+                                normal shape, and people read that scatter as a
+                                geographic claim it never made. ponytail: 700 hardcoded
+                                here, mirror it from the API if it ever moves. */}
+                            Kept at least 700 m apart; how near or far they land from
+                            each other means nothing.
                           </p>
                           <ul className="place-list suggest-results">
                             {suggestCells.map((c, i) => (
