@@ -1632,6 +1632,39 @@ export default function MapView() {
   // spread — see character.ts for why this replaced raw counts (T-019).
   const suggestCharacter = areaCharacter(suggestCells, suggestLayers);
 
+  // The per-cell reach line reads "everything within <1'" on every card, not
+  // just often — the scoring gate above already excluded anything slower, so
+  // there is nothing left for a per-card line to distinguish (see the reach
+  // comment further down). Rather than print the same clause ten times, hoist
+  // it into the note once, and only once every cell clears every asked-about
+  // layer with the same rounded label; a single miss or a differing label
+  // falls back to the existing per-card behaviour.
+  const suggestReachLabels =
+    suggestLayers.length > 0
+      ? suggestCells.map((c) =>
+          suggestLayers.every((l) => c.layers[l] != null)
+            ? reachLabel(
+                Math.max(...suggestLayers.map((l) => c.layers[l] as number))
+              )
+            : null
+        )
+      : [];
+  const suggestUniformReach =
+    suggestReachLabels.length > 0 &&
+    suggestReachLabels.every((l) => l !== null && l === suggestReachLabels[0])
+      ? suggestReachLabels[0]
+      : null;
+
+  // "these ten" was a lie the moment fewer than ten cells qualified — say
+  // "these N" instead, so the sentence stays true at any result count.
+  const suggestNoteText = `${
+    scoresAreTied(suggestCells)
+      ? `${suggestCells.length} areas, all equally close to what you picked. They are alternatives, not a ranking.`
+      : `${suggestCells.length} areas, best first.`
+  }${
+    suggestUniformReach ? ` Everything is within ${suggestUniformReach} in all of them.` : ""
+  } More and less are relative to these ${suggestCells.length} areas, not to Berlin.`;
+
   // Compact stand-in for the questions once "Show me" has been clicked — the
   // panel shows what was asked, not the ranked list (T-017: that lives on
   // the map).
@@ -1985,16 +2018,12 @@ export default function MapView() {
                       {suggestState === "ok" && suggestCells.length > 0 && (
                         <>
                           <p className="muted suggest-tie-note">
-                            {scoresAreTied(suggestCells)
-                              ? `${suggestCells.length} areas, all equally close to what you picked. They are alternatives, not a ranking.`
-                              : `${suggestCells.length} areas, best first.`}{" "}
                             {/* "more dining" is meaningless without a referent, and
                                 the wrong referent is worse than none: every result
                                 here is a top-200 cell in the city, so a Berlin-wide
                                 baseline would label all ten "dense in everything"
                                 and just restate the selection criterion. */}
-                            More and less compare these results to each other, not to
-                            Berlin as a whole.
+                            {suggestNoteText}
                           </p>
                           <ul className="place-list suggest-results">
                             {suggestCells.map((c, i) => {
@@ -2027,23 +2056,26 @@ export default function MapView() {
                                         {c.name ??
                                           `${c.lat.toFixed(4)}, ${c.lon.toFixed(4)}`}
                                       </span>
-                                      {(misses.length > 0 || maxSecs != null) && (
-                                        <span className="pl-kind suggest-layers">
-                                          {misses.map((layer) => (
-                                            <span
-                                              key={layer}
-                                              className="suggest-layer suggest-miss"
-                                            >
-                                              {`no ${LAYER_LABEL[layer]} in 30 min`}
-                                            </span>
-                                          ))}
-                                          {maxSecs != null && (
-                                            <span className="suggest-layer">
-                                              {`everything within ${reachLabel(maxSecs)}`}
-                                            </span>
-                                          )}
-                                        </span>
-                                      )}
+                                      {/* Hidden once every card would say the same
+                                          thing — see suggestUniformReach above. */}
+                                      {!suggestUniformReach &&
+                                        (misses.length > 0 || maxSecs != null) && (
+                                          <span className="pl-kind suggest-layers">
+                                            {misses.map((layer) => (
+                                              <span
+                                                key={layer}
+                                                className="suggest-layer suggest-miss"
+                                              >
+                                                {`no ${LAYER_LABEL[layer]} in 30 min`}
+                                              </span>
+                                            ))}
+                                            {maxSecs != null && (
+                                              <span className="suggest-layer">
+                                                {`everything within ${reachLabel(maxSecs)}`}
+                                              </span>
+                                            )}
+                                          </span>
+                                        )}
                                       {/* The reach time is "<1′" on every layer of
                                           every result — the scoring gate already
                                           excluded anything slower, so it can't tell
@@ -2064,21 +2096,29 @@ export default function MapView() {
                                           "an even mix" would assert a comparison that
                                           never happened, so below 3 say nothing. */}
                                       {suggestCells.length >= 3 && (
-                                        <span className="pl-kind">
-                                          {more.length === 0 && less.length === 0
-                                            ? "an even mix"
-                                            : [
-                                                more.length
-                                                  ? `more ${more
-                                                      .map((layer) => LAYER_LABEL[layer])
-                                                      .join(" & ")}`
-                                                  : null,
-                                                less.length
-                                                  ? `less ${LAYER_LABEL[less[0]]}`
-                                                  : null,
-                                              ]
-                                                .filter(Boolean)
-                                                .join(" · ")}
+                                        // Each clause is its own flex item (row 1 above
+                                        // does the same for misses/reach) so a wrap
+                                        // breaks between clauses, not mid-clause or
+                                        // straight after a now-deleted "·" separator.
+                                        <span className="pl-kind suggest-layers suggest-character">
+                                          {more.length === 0 && less.length === 0 ? (
+                                            <span className="suggest-layer">an even mix</span>
+                                          ) : (
+                                            <>
+                                              {more.length > 0 && (
+                                                <span className="suggest-layer">
+                                                  {`more ${more
+                                                    .map((layer) => LAYER_LABEL[layer])
+                                                    .join(" & ")}`}
+                                                </span>
+                                              )}
+                                              {less.length > 0 && (
+                                                <span className="suggest-layer">
+                                                  {`less ${LAYER_LABEL[less[0]]}`}
+                                                </span>
+                                              )}
+                                            </>
+                                          )}
                                         </span>
                                       )}
                                     </span>
