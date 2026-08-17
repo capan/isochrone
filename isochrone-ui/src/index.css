@@ -173,6 +173,9 @@ a { color: #2a63b5; }
 .linkish {
   border: none; background: none; padding: 0; cursor: pointer;
   color: #2a63b5; font: var(--fs-body) system-ui; text-decoration: underline;
+  /* T-035: anchor for the coarse-pointer ::after hit-area expansion below —
+     no visual effect at rest. */
+  position: relative;
 }
 
 /* place search. type="search" for the browser's own clear button. */
@@ -344,13 +347,24 @@ a { color: #2a63b5; }
     position: fixed; left: 0; right: 0; bottom: 0; width: auto;
     max-height: 78dvh; border-top: 1px solid #e3e6ea;
     border-radius: 14px 14px 0 0; box-shadow: 0 -3px 16px rgba(0,0,0,0.22);
-    /* Collapsed height, calibrated so the profile picker peeks out whole. Was
-       116px; T-032's larger tap targets grew the handle/search/picker stack by
-       a measured ~11px, which clipped the bottom of that row, so this follows
-       it up to the next step on the 4px rhythm. Calculated from the CSS
-       deltas, not observed — if the row looks cropped or the sheet sits too
-       tall at phone width, this constant is the one to move. */
-    transform: translateY(calc(100% - 128px));
+    /* Collapsed height, so the profile picker peeks out whole. No longer a
+       hardcoded number — hand-tuned three times (116px, then 128px in
+       T-032, then 200px in T-035 round 1) and wrong twice: the constant
+       lived outside `@media (pointer: coarse)`, so every mouse user at this
+       width paid for padding they never got. And 128px was wrong in the
+       other direction all along: it clipped the picker by ~19px under
+       pointer:fine, unnoticed since T-032 set it by calculation and never
+       saw it render. Measured, 500px viewport, 2026-08-17: the collapsed
+       stack (sheet-handle top to `.seg` bottom) is 146px under pointer:fine
+       and 199px under pointer:coarse, so --peek lands at 152/205 with the
+       +6 slack — a 53px split no single width-gated constant can straddle,
+       since `pointer` and viewport width vary independently. So this is
+       measured at runtime instead (MapView.tsx, the
+       ResizeObserver by sheetHandleRef/mobilitySegRef) and written here as
+       --peek. 200px below is only the pre-measurement first-paint
+       fallback — safe for both pointer types since it's the larger of the
+       two measured values. */
+    transform: translateY(calc(100% - var(--peek, 200px)));
     transition: transform 0.22s ease;
   }
   .panel.open { transform: translateY(0); }
@@ -612,3 +626,92 @@ a { color: #2a63b5; }
   font: var(--fw-heading) var(--fs-body) system-ui;
 }
 .suggest-submit:hover { background: #0e3766; }
+
+/* ---- T-035: coarse-pointer touch targets -------------------------------
+   Eight elements measured under 44px (iOS HIG, WCAG 2.5.5) with
+   getBoundingClientRect() at a 500px viewport, 2026-08-17 — not derived from
+   CSS padding, which gets .place-list button / .suggest-results button wrong
+   (they measure 432x52 already; flex stretch and inherited line-height make
+   up what the stylesheet alone doesn't show). Gated on pointer, not width:
+   a touch laptop at 1400px needs this, a mouse at 500px does not, so this
+   must never become a width breakpoint. */
+@media (pointer: coarse) {
+  .rail-toggle {
+    width: 44px;
+    height: 44px;
+    line-height: 44px;
+  }
+
+  /* The sheet's primary open/close gesture, and the smallest target on the
+     page (500x15). The grip bar itself (.sheet-handle span, 38x4) stays as
+     drawn — only the button's padding grows, so the *hit area* clears 44px
+     without the visible pill changing. */
+  .sheet-handle {
+    padding: 20px 0;
+  }
+
+  /* Growing the visible box would reflow the text around it ("How it
+     works", "edit answers", ...) — expand the hit area instead with a
+     transparent ::after (needs .linkish's `position: relative` above). */
+  .linkish::after {
+    content: "";
+    position: absolute;
+    /* Asymmetric on purpose. The tight case is "How it works" in
+       .panel-head, which used to leak a 2px steal band into .search
+       button's top edge — measured (500px viewport, pointer:coarse,
+       2026-08-17, headless Chrome): 18px clear above to .sheet-handle,
+       12px clear below to .search button, own box 16px tall. 44px total
+       is reachable only by taking nearly all of both, so this uses 17px
+       above and 11px below — 1px short of touching either neighbour, the
+       floor this ticket allows. A same-size expansion on both edges would
+       either fall short of 44px or collide.
+       The other three .linkish instances (edit answers, see what you can
+       ask, what it can do) were each checked the same way — hit-tested
+       with elementFromPoint just inside this expansion — and none has a
+       button close enough on either axis for these insets to reach:
+       "see what you can ask" sits only 8px under the install line's copy
+       button, but that button is far to its right, outside the ::after's
+       own (unexpanded) width, so the two never overlap. */
+    top: -17px;
+    right: 0;
+    bottom: -11px;
+    left: 0;
+  }
+
+  .chips button {
+    padding: 13px 12px;
+  }
+
+  .help-control {
+    padding: 15px 12px;
+  }
+
+  .search input {
+    padding: 14px 8px;
+  }
+
+  .search button {
+    padding: 6px 13px;
+  }
+
+  /* THE TRAP: this is the profile picker. Growing it grows the collapsed
+     bottom-sheet's header stack, which is why the peek constant in the
+     (max-width:720px) block below was recalculated in this same change —
+     see the comment on `.panel` there. */
+  .seg button {
+    padding: 14px 4px;
+  }
+
+  /* Leaflet's own stylesheet sets `.leaflet-touch .leaflet-bar a` to 30x30,
+     at (0,0,2,1) — two classes plus the `a` type selector. A same-shape
+     `.leaflet-control-zoom a` is only (0,0,1,1) and loses outright,
+     regardless of source order; confirmed by measuring the rendered box
+     under an emulated coarse pointer, not by reading the cascade. `.app` is
+     a real ancestor (wraps the whole page, including the map), not an
+     invented hook, so this reaches (0,0,3,1) and wins unconditionally. */
+  .app .leaflet-control-zoom.leaflet-bar a {
+    width: 44px;
+    height: 44px;
+    line-height: 44px;
+  }
+}

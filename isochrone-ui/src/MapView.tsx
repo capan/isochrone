@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import L from "leaflet";
 import HelpPanel from "./HelpPanel";
 import { areaCharacter } from "./character";
@@ -539,6 +539,12 @@ export default function MapView() {
   const [panelOpen, setPanelOpen] = useState(
     () => typeof window === "undefined" || window.innerWidth > 720
   );
+  // T-035 round 2: the collapsed sheet's peek height (see --peek in
+  // index.css) is measured here instead of hardcoded — see the effect
+  // below, right after the JSX refs it needs.
+  const panelRef = useRef<HTMLElement | null>(null);
+  const sheetHandleRef = useRef<HTMLButtonElement | null>(null);
+  const mobilitySegRef = useRef<HTMLDivElement | null>(null);
   const placeLayerRef = useRef<L.LayerGroup | null>(null);
   const placesGenRef = useRef(0);
   const drawPlacesRef = useRef<(items: Place[]) => void>(() => {});
@@ -1211,6 +1217,44 @@ export default function MapView() {
     };
   }, []);
 
+  // T-035 round 2: the bottom sheet's collapsed "peek" height used to be a
+  // hardcoded pixel constant in index.css, hand-recalibrated twice (T-032,
+  // T-035) and wrong both times — see the comment on --peek there for the
+  // measured 147px (pointer:fine) / 200px (pointer:coarse) split that made
+  // "one constant" a dead end. Measured instead: sheet-handle's top to the
+  // mobility .seg row's bottom is exactly the collapsed header stack, on
+  // both pointer types and any viewport width, so read it from the DOM.
+  // ResizeObserver already batches to at most one callback per frame across
+  // both observed elements, so no extra debounce is needed here.
+  // useLayoutEffect, and measure() called directly rather than left to the
+  // observer's first delivery: ResizeObserver reports on an animation frame,
+  // so on a plain useEffect the sheet paints once at the CSS fallback and
+  // then snaps to the measured value. Worse, a document whose frames are
+  // frozen — a background tab, an offscreen iframe — gets no delivery at all
+  // and silently keeps the fallback, which is the fine/coarse leak this whole
+  // change exists to remove. Measured 2026-08-17 in a hidden tab: zero
+  // callbacks in 800ms, even after forcing a real size change. The observer
+  // stays for what comes later (pointer type, font load, rotation); the
+  // synchronous call is what makes the first paint correct.
+  useLayoutEffect(() => {
+    const panel = panelRef.current;
+    const top = sheetHandleRef.current;
+    const bottom = mobilitySegRef.current;
+    if (!panel || !top || !bottom) return;
+    const measure = () => {
+      // The panel's own translateY offset (open vs. collapsed) shifts both
+      // elements by the same amount, so it cancels out of this difference —
+      // safe to measure in either state.
+      const px = bottom.getBoundingClientRect().bottom - top.getBoundingClientRect().top;
+      if (px > 0) panel.style.setProperty("--peek", `${Math.round(px) + 6}px`); // +6: slack off the viewport edge
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(top);
+    ro.observe(bottom);
+    return () => ro.disconnect();
+  }, []);
+
   // Amenities are a second request, so they get their own generation guard —
   // same overtaking problem the isochrone had.
   const loadPlaces = async (lat: number, lon: number, filter = kindFilter) => {
@@ -1779,9 +1823,10 @@ export default function MapView() {
 
   return (
     <div className="app">
-      <aside className={`panel${panelOpen ? " open" : ""}`}>
+      <aside className={`panel${panelOpen ? " open" : ""}`} ref={panelRef}>
         <button
           className="sheet-handle"
+          ref={sheetHandleRef}
           onClick={() => setPanelOpen((o) => !o)}
           aria-expanded={panelOpen}
         >
@@ -1826,7 +1871,7 @@ export default function MapView() {
             </ul>
           )}
 
-          <div className="seg" role="group" aria-label="mobility profile">
+          <div className="seg" role="group" aria-label="mobility profile" ref={mobilitySegRef}>
             {PROFILES.map((p) => (
               <button
                 key={p}
