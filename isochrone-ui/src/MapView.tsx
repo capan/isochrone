@@ -1042,7 +1042,39 @@ export default function MapView() {
     };
     refreshAreasRef.current = refreshAreas;
     refreshAreas();
-    const areaTimer = setInterval(refreshAreas, 5000);
+
+    // 5s forever, unconditionally, was 720 requests/hour per open tab — a
+    // phone's radio and battery for a list that changes a few times a day.
+    // Clear the timer outright while hidden rather than leaving it running
+    // and early-returning on tick: a no-op fetch still wakes the radio, so
+    // the point is to not make the request at all. `areaTimer` is nulled
+    // whenever stopped so the visibilitychange handler below can guard
+    // against stacking a second interval if it fires while already visible.
+    let areaTimer: ReturnType<typeof setInterval> | null = null;
+    const stopAreaTimer = () => {
+      if (areaTimer) {
+        clearInterval(areaTimer);
+        areaTimer = null;
+      }
+    };
+    const startAreaTimer = () => {
+      if (!areaTimer) areaTimer = setInterval(refreshAreas, 5000);
+    };
+    const onVisibilityChange = () => {
+      if (document.hidden) {
+        stopAreaTimer();
+      } else {
+        // Coming back to stale data is the reward for returning; refresh
+        // once immediately, then resume the 5s cadence. Calls refreshAreas
+        // directly, not refreshAreasRef.current — both are the same function
+        // for this mount's lifetime, and the ref exists only so startImport,
+        // which is outside this effect's closure, can reach it.
+        refreshAreas();
+        startAreaTimer();
+      }
+    };
+    if (!document.hidden) startAreaTimer();
+    document.addEventListener("visibilitychange", onVisibilityChange);
 
     const clearIsochrone = () => {
       if (isochroneRef.current) {
@@ -1212,7 +1244,8 @@ export default function MapView() {
     ro.observe(document.getElementById("map")!);
 
     return () => {
-      clearInterval(areaTimer);
+      stopAreaTimer();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       ro.disconnect();
     };
   }, []);
