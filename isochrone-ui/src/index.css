@@ -484,6 +484,13 @@ a { color: #2a63b5; }
 }
 .suggest-layers { display: flex; flex-wrap: wrap; gap: 4px 8px; font-size: var(--fs-meta); }
 .suggest-layer { color: var(--text-tertiary); }
+/* The character row dropped its "·" separator, because a wrap could leave one
+   orphaned at the start of a line reading as a broken list marker. But 8px of
+   grey between two same-coloured clauses is not enough to stop "more dining"
+   and "less green space" reading as one run-on when both fit on one line, so
+   this row buys the separation back in whitespace instead of a glyph — which
+   costs nothing when it wraps. */
+.suggest-character { column-gap: 16px; }
 /* The negative signal — "no pharmacy in 30 min" — is the strongest claim the
    feature makes, so it is not styled to disappear: red, not grey. */
 .suggest-miss { color: #b3261e; }
@@ -504,17 +511,15 @@ a { color: #2a63b5; }
 
 .suggest-summary {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
   margin: 8px 0;
 }
 .suggest-summary-text {
   margin: 0;
   color: var(--text-secondary);
   font-size: var(--fs-body);
-  flex: 1;
-  min-width: 0;
 }
 
 /* Says whether the list below is a ranking or a set of alternatives. Ten cells
@@ -532,11 +537,22 @@ a { color: #2a63b5; }
 .suggest-results {
   max-height: 320px;
   overflow-y: auto;
+  padding-right: 6px;
 }
 
 /* One clause of caveat (bike/one-way) or the dog→greenspace disclosure —
    both sit right under the buttons that triggered them, not tucked away. */
 .suggest-note { margin: 4px 0 0; font-size: var(--fs-meta); }
+
+/* The scrollable result list (above) butted straight into the heat legend
+   below it with no boundary, reading as if the list bled into the legend.
+   Scoped to .heat-ramp, not .ramp — .ramp is also the plain isochrone-height
+   legend up top, which has nothing above it to separate from. */
+.heat-ramp {
+  border-top: 1px solid #eceef1;
+  padding-top: 8px;
+  margin-top: 8px;
+}
 
 .suggest-modal-backdrop {
   position: fixed;
