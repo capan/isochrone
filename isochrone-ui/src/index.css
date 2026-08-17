@@ -117,6 +117,28 @@ a { color: #2a63b5; }
   background: #fff;
 }
 
+/* T-038: "use my location", same plain look and same topleft stack as
+   .help-control, sitting between the layers control and it. */
+.locate-control {
+  border: none;
+  border-radius: 9px;
+  cursor: pointer;
+  padding: 8px 12px;
+  font: var(--fs-body) system-ui;
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.28);
+}
+.locate-control:hover {
+  background: #fff;
+}
+/* A fix can take several seconds; disabled alone reads as broken, not busy. */
+.locate-control:disabled,
+.locate-control.locating {
+  opacity: 0.6;
+  cursor: default;
+}
+
 /* ---- app shell -------------------------------------------------------- */
 /* Sidebar beside the map on desktop, bottom sheet on phones. Six floating
    panels over the map had already run out of corners before the places list
@@ -774,6 +796,17 @@ a { color: #2a63b5; }
 
   .help-control {
     padding: 15px 12px;
+  }
+
+  /* Explicit box, not padding: unlike "How it works", this button is a
+     single glyph, and padding alone left it comfortably tall but narrower
+     than 44px on its short axis (width). border-box (set globally) makes
+     width/height the full hit target, padding included. */
+  .locate-control {
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    font-size: 18px;
   }
 
   .search input {

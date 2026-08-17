@@ -188,6 +188,13 @@ type Area = {
   max_lon: number;
 };
 
+// The shipped city, not a user's 5x5km import box — its schema is not
+// area_*, the same test the recently-added list draws (inverted). Pulled out
+// because T-038's "use my location" out-of-coverage fallback needs the exact
+// same city-lookup fitToCity already does, on demand rather than once.
+const cityArea = (areas: Area[]) =>
+  areas.find((a) => a.schema_name && !a.schema_name.startsWith("area_"));
+
 // Intl does the pluralising and the localising; a hand-rolled "3 minutes ago"
 // would be a worse version of something already in the runtime.
 const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
@@ -464,6 +471,17 @@ export default function MapView() {
   const drawGenRef = useRef(0);
   // the coverage fit is a first-load framing, not something the 5s poll redoes
   const didFitRef = useRef(false);
+  // T-038: bounding box of imported coverage, stashed whenever refreshAreas
+  // already has the GeoJSON rather than fetched separately. A bbox, not the
+  // polygon itself — the only question "use my location" needs answered is
+  // "another continent" vs "Berlin", which a box settles completely, and a
+  // ref rather than state since nothing renders from it.
+  const coverageBboxRef = useRef<{
+    minLat: number;
+    minLon: number;
+    maxLat: number;
+    maxLon: number;
+  } | null>(null);
   const [shownMinutes, setShownMinutes] = useState(MAX_MINUTES);
   // ref for the map effect (closes over it once), state for the legend
   const basemapRef = useRef<BasemapKey>(savedBasemap());
@@ -478,6 +496,12 @@ export default function MapView() {
 
   // the only two things worth re-rendering for; the map itself stays imperative
   const [offer, setOffer] = useState<{ lat: number; lon: number } | null>(null);
+  // T-038: a GPS fix landing outside coverage. Deliberately not `offer` —
+  // that state means "import is available here" and drives the import
+  // button; this means "the map only covers Berlin, want to see it", and
+  // conflating the two would offer a stranger in Tokyo a 5x5km import of
+  // Tokyo.
+  const [locateOffer, setLocateOffer] = useState(false);
   // T-031: non-null exactly when a click produced isochrone bands — drives
   // both the ramp legend's visibility and the map popup summary below. Reset
   // to null on every failure path (offer, error, empty) alongside the
@@ -705,6 +729,95 @@ export default function MapView() {
       redrawRef.current();
     });
 
+    // T-038: "use my location". Skipped entirely, not rendered disabled, when
+    // the API itself doesn't exist — a button that can never work is worse
+    // than no button. Added before HelpControl so it lands between the
+    // layers control and "How it works" in the topleft stack (control order
+    // = add order).
+    if (navigator.geolocation) {
+      const LocateControl = L.Control.extend({
+        onAdd() {
+          const btn = L.DomUtil.create("button", "locate-control");
+          btn.type = "button";
+          btn.setAttribute("aria-label", "Use my location");
+          btn.textContent = "◎";
+          L.DomEvent.disableClickPropagation(btn);
+          L.DomEvent.on(btn, "click", () => {
+            if (btn.disabled) return; // one fix in flight at a time
+            // Geolocation is only available in a secure context; over plain
+            // HTTP (e.g. a LAN IP, the way T-036 gets tested on a phone)
+            // getCurrentPosition rejects with PERMISSION_DENIED, which the
+            // error handler below deliberately swallows. Without this check
+            // that reads as a silent no-op — the button spins and resets
+            // with nothing to diagnose. Name the real cause instead.
+            if (!window.isSecureContext) {
+              showToast("Location needs a secure (HTTPS) connection.");
+              return;
+            }
+            btn.disabled = true;
+            btn.classList.add("locating");
+            beginLoading();
+            navigator.geolocation.getCurrentPosition(
+              (pos) => {
+                endLoading();
+                btn.disabled = false;
+                btn.classList.remove("locating");
+                const { latitude: lat, longitude: lon } = pos.coords;
+                const box = coverageBboxRef.current;
+                if (!box) {
+                  // Fail closed, not open: coverage hasn't loaded yet (a
+                  // fast cached fix can beat the /api/areas+/api/coverage
+                  // round trip, and if that fetch ever errors the ref stays
+                  // null all session). Treating unknown as "inside" used to
+                  // fly the map to the raw coordinate and hand
+                  // updateIsochrones a spot outside coverage, which lands in
+                  // setOffer — the import-offer path this feature exists to
+                  // avoid for a fix outside Berlin. Ask them to retry instead
+                  // of guessing either way.
+                  showToast("Still loading the map data — try again in a moment.");
+                  return;
+                }
+                const inside =
+                  lat >= box.minLat &&
+                  lat <= box.maxLat &&
+                  lon >= box.minLon &&
+                  lon <= box.maxLon;
+                if (!inside) {
+                  // Do not move the map and do not run the isochrone flow —
+                  // Berlin is the only imported city, so flying someone in
+                  // Tokyo to their own coordinate lands them on a blank map,
+                  // and offering them a 5x5km import of Tokyo is the wrong
+                  // answer T-038 exists to avoid.
+                  setLocateOffer(true);
+                  return;
+                }
+                setLocateOffer(false);
+                // 15: between focusSuggestion's 14 (wider area) and
+                // focusPlace's 16 (a single POI) — "where am I" sits between.
+                map.setView([lat, lon], 15);
+                updateRef.current(lat, lon);
+              },
+              (err) => {
+                endLoading();
+                btn.disabled = false;
+                btn.classList.remove("locating");
+                // Silent, deliberately: the browser already showed its own
+                // permission dialog, so the user knows what they chose. A red
+                // error toast on top of a normal "no" is scolding, not help.
+                if (err.code === err.PERMISSION_DENIED) return;
+                showToast(
+                  "Could not get your location. Check your device's location settings and try again."
+                );
+              },
+              { enableHighAccuracy: false, timeout: 10000, maximumAge: 60000 }
+            );
+          });
+          return btn;
+        },
+      });
+      new LocateControl({ position: "topleft" }).addTo(map);
+    }
+
     // A real Leaflet control rather than an absolutely positioned button:
     // Leaflet stacks and spaces the top-left corner itself, so this can't
     // land on top of the zoom buttons whatever size they end up.
@@ -916,7 +1029,7 @@ export default function MapView() {
     const fitToCity = (areas: Area[]) => {
       // A deep link already names the place to look at; never yank it away.
       if (didFitRef.current || (!isNaN(urlLat) && !isNaN(urlLon))) return;
-      const city = areas.find((a) => a.schema_name && !a.schema_name.startsWith("area_"));
+      const city = cityArea(areas);
       if (!city) return; // fresh deployment with no city seeded yet
       didFitRef.current = true;
       map.fitBounds(
@@ -982,6 +1095,27 @@ export default function MapView() {
             poly.map((r) => r.map(([lon, lat]) => [lat, lon] as L.LatLngTuple))
           );
         };
+        const coverageRings = rings(coverage);
+
+        // T-038: coverage bbox, stashed here rather than fetched separately —
+        // this is the same GeoJSON the veil above already decoded. A plain
+        // min/max scan, not a second geometry pass; the "use my location"
+        // coverage test only needs a box.
+        if (coverageRings.length) {
+          let minLat = Infinity;
+          let minLon = Infinity;
+          let maxLat = -Infinity;
+          let maxLon = -Infinity;
+          for (const ring of coverageRings) {
+            for (const [lat, lon] of ring) {
+              if (lat < minLat) minLat = lat;
+              if (lat > maxLat) maxLat = lat;
+              if (lon < minLon) minLon = lon;
+              if (lon > maxLon) maxLon = lon;
+            }
+          }
+          coverageBboxRef.current = { minLat, minLon, maxLat, maxLon };
+        }
 
         L.polygon(
           [
@@ -991,7 +1125,7 @@ export default function MapView() {
               [85, 180],
               [-85, 180],
             ] as L.LatLngTuple[],
-            ...rings(coverage),
+            ...coverageRings,
           ],
           {
             stroke: false,
@@ -1228,6 +1362,7 @@ export default function MapView() {
 
     map.on("click", (e: L.LeafletMouseEvent) => {
       setOffer(null);
+      setLocateOffer(false);
       // Clicking means they got the idea; it also keeps the banner from
       // sharing the top strip with the import offer.
       setArrival(false);
@@ -1476,6 +1611,7 @@ export default function MapView() {
     if (!map) return;
     setResults([]);
     setOffer(null);
+    setLocateOffer(false);
     // Same reasoning as the map click: acting on the map means the banner has
     // done its job, and it shares the top strip with the import offer.
     setArrival(false);
@@ -2341,6 +2477,30 @@ export default function MapView() {
           <div className="floating offer">
             <span>Nothing imported here yet.</span>
             <button onClick={startImport}>Import 5×5 km area</button>
+          </div>
+        )}
+
+        {/* T-038: a GPS fix outside the coverage bbox. Not `offer` — no import
+            makes sense for a stranger's own city, so this offers the one thing
+            that does: seeing the city the app actually covers. */}
+        {locateOffer && (
+          <div className="floating offer">
+            <span>This map only covers Berlin so far.</span>
+            <button
+              onClick={() => {
+                setLocateOffer(false);
+                const map = mapRef.current;
+                const city = cityArea(areas);
+                if (map && city) {
+                  map.fitBounds([
+                    [city.min_lat, city.min_lon],
+                    [city.max_lat, city.max_lon],
+                  ]);
+                }
+              }}
+            >
+              Show Berlin
+            </button>
           </div>
         )}
 
