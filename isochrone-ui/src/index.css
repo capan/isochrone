@@ -27,6 +27,17 @@
   --text-primary: #23282d;   /* ~14.6:1 on white */
   --text-secondary: #4a5158; /* ~8.0:1 on white */
   --text-tertiary: #6b7280;  /* ~4.8:1 on white — the floor, nothing lighter */
+
+  /* T-036: env(safe-area-inset-*) always resolves to 0px on desktop Chrome
+     (no notch or home-indicator hardware exists to report), so the layout
+     consequence of a NON-zero inset can't be observed on this machine
+     directly. Routed through custom properties instead of inlining env()
+     at each call site, so a test can override e.g. `--sab: 34px` on :root
+     and see the real geometry — env() itself can't be forced from CSS. */
+  --sat: env(safe-area-inset-top, 0px);
+  --sar: env(safe-area-inset-right, 0px);
+  --sab: env(safe-area-inset-bottom, 0px);
+  --sal: env(safe-area-inset-left, 0px);
 }
 
 * { box-sizing: border-box; }
@@ -120,6 +131,24 @@ a { color: #2a63b5; }
 .map-wrap { position: relative; flex: 1; min-width: 0; }
 #map { position: absolute; inset: 0; }
 
+/* T-036 round 2: Leaflet's own stylesheet (leaflet.css:138-155) anchors its
+   control-corner containers flush to the map container's edges —
+   `.leaflet-top{top:0}`, `.leaflet-left{left:0}`, etc — with no notion of a
+   device inset. Once viewport-fit=cover let #map run to the physical screen
+   edge, the zoom control, layers control and .help-control (all topleft)
+   inherited that exposure, undoing the tap-target work T-035 did on them.
+   Leaflet's four rules are plain single-class selectors, specificity (0,1,0);
+   `.app` as a real ancestor lifts ours to (0,2,0), which beats them on
+   specificity alone regardless of stylesheet load order — confirmed by
+   grepping leaflet.css for a higher-specificity rule on these four classes;
+   there isn't one, so this isn't the T-035 case where `.leaflet-touch
+   .leaflet-bar a` needed matching. Only topleft carries a control today, but
+   all four corners are covered so one added elsewhere doesn't reopen this. */
+.app .leaflet-top { top: var(--sat); }
+.app .leaflet-right { right: var(--sar); }
+.app .leaflet-bottom { bottom: var(--sab); }
+.app .leaflet-left { left: var(--sal); }
+
 /* T-031: shared loading bar, pinned across the very top of the map area.
    z-index 1075 is deliberately between .rail (1050) and .floating/.toast
    (1100/1150): it must paint over the map and the rail — both of which can
@@ -130,7 +159,10 @@ a { color: #2a63b5; }
    the (max-width:720px) block below. */
 .loading-bar {
   position: absolute;
-  top: 0; left: 0; right: 0;
+  /* T-036 round 2: was flush top:0, which is the physical status-bar/notch
+     band on mobile now that .map-wrap fills the full dvh (.panel is fixed
+     and out of flow). --sat is 0px with no inset, so no-op elsewhere. */
+  top: var(--sat); left: 0; right: 0;
   height: 3px;
   z-index: 1075;
   overflow: hidden;
@@ -324,16 +356,21 @@ a { color: #2a63b5; }
   background: rgba(255,255,255,0.96); box-shadow: 0 2px 6px rgba(0,0,0,0.3);
   display: flex; align-items: center; gap: 9px; font: var(--fs-body) system-ui;
 }
-.offer { top: 12px; padding: 8px 13px; border-radius: 4px; }
-.arrival { top: 12px; padding: 8px 8px 8px 13px; border-radius: 20px; max-width: 92%; font-size: var(--fs-body); }
+/* top: 12px pushed under a notch with no inset; --sat is 0px on desktop and
+   anywhere without one, so this is a no-op there. */
+.offer { top: calc(12px + var(--sat)); padding: 8px 13px; border-radius: 4px; }
+.arrival { top: calc(12px + var(--sat)); padding: 8px 8px 8px 13px; border-radius: 20px; max-width: 92%; font-size: var(--fs-body); }
 .arrival .dismiss {
   border: none; background: none; cursor: pointer; color: var(--text-tertiary);
   font-size: var(--fs-title); line-height: 1; padding: 0 5px;
 }
 .offer button { font: var(--fs-body) system-ui; padding: 5px 12px; cursor: pointer; }
-.progress { bottom: 14px; padding: 8px 12px; border-radius: 20px; color: var(--text-secondary); font-size: var(--fs-body); }
+/* The only bottom-anchored floater, so it has the sheet's problem in miniature:
+   14px off the physical edge puts it inside the home-indicator band. Same
+   treatment as the top-anchored ones above, on the other axis. */
+.progress { bottom: calc(14px + var(--sab)); padding: 8px 12px; border-radius: 20px; color: var(--text-secondary); font-size: var(--fs-body); }
 .toast {
-  position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 1150;
+  position: absolute; top: calc(12px + var(--sat)); left: 50%; transform: translateX(-50%); z-index: 1150;
   max-width: 80vw; background: #b3261e; color: #fff; padding: 8px 16px;
   border-radius: 4px; font: var(--fs-body) system-ui; box-shadow: 0 2px 6px rgba(0,0,0,0.3);
 }
@@ -364,11 +401,42 @@ a { color: #2a63b5; }
        --peek. 200px below is only the pre-measurement first-paint
        fallback — safe for both pointer types since it's the larger of the
        two measured values. */
-    transform: translateY(calc(100% - var(--peek, 200px)));
+    /* T-036: collapsed reveal is --peek plus the bottom inset, not --peek
+       alone. The visible strip is measured from the panel's OWN top edge
+       (handle + .seg, unaffected by translateY), so revealing only --peek
+       would put the picker's bottom edge flush with the physical screen
+       edge — exactly where a home indicator lives. Revealing --peek + --sab
+       instead pushes that same content up by --sab, landing its bottom
+       edge flush with the TOP of the inset band rather than the bottom of
+       the screen; the extra --sab of panel that becomes visible below it is
+       still the panel's own background (plus a sliver of whatever content
+       follows .seg, same as the existing +6px slack already lets through),
+       so the sheet still reads as anchored to the physical bottom with no
+       gap of map showing under it. --sab is 0px with no inset, so this is
+       byte-for-byte the old formula there. */
+    transform: translateY(calc(100% - var(--peek, 200px) - var(--sab)));
     transition: transform 0.22s ease;
   }
   .panel.open { transform: translateY(0); }
-  .panel-scroll { max-height: 78dvh; }
+  .panel-scroll {
+    max-height: 78dvh;
+    /* Expanded sheet's bottom edge sits flush with the physical screen
+       bottom (translateY(0) above); without this, the last scrolled
+       content would end up under the home indicator instead of above it. */
+    padding-bottom: calc(20px + var(--sab));
+    /* T-036 round 2: same reasoning on the other axis. .panel itself stays
+       left:0/right:0 so the sheet's white background still spans edge to
+       edge (matches how bottom is handled: the panel's own box stays flush,
+       only the CONTENT gets pushed in) — padding the content here, not the
+       container, so a side notch/rounded corner in landscape can't clip
+       text or controls without pulling the sheet's background in from the
+       edge and revealing a strip of map. Reachable today only via extreme
+       aspect ratios (this breakpoint is <=720px wide), not by width alone,
+       which is exactly why it was worth fixing rather than leaving tied to
+       the breakpoint. */
+    padding-left: calc(16px + var(--sal));
+    padding-right: calc(16px + var(--sar));
+  }
   .sheet-handle {
     display: block; width: 100%; border: none; background: none;
     padding: 8px 0 3px; cursor: pointer;
@@ -440,11 +508,26 @@ a { color: #2a63b5; }
 @media (min-width: 721px) {
   .rail {
     position: fixed;
-    top: 14px;
-    right: 14px;
+    /* T-036 round 2: this breakpoint is reachable in phone landscape
+       (iPhone 14 Pro landscape is ~852px CSS width), where the rail's
+       top-right corner can land under a side notch or rounded corner —
+       plain 14px had no headroom for that. max-height's subtracted amount
+       grows by the same --sat so the rail's bottom edge stays where it was
+       rather than running --sat past the bottom of the viewport now that
+       its top start moved down by --sat. */
+    top: calc(14px + var(--sat));
+    right: calc(14px + var(--sar));
     width: 300px;
-    max-height: calc(100vh - 28px);
-    max-height: calc(100dvh - 28px);
+    /* Both insets, not just --sat. The 28px is the 14px gap at top and the
+       14px at bottom; moving `top` down by --sat and subtracting only --sat
+       keeps the box the same distance from the PHYSICAL bottom edge, which
+       is now inside the home-indicator band. Measured 2026-08-17 with
+       --sat:47 --sab:34 on a 717px viewport: top 61 + max-height 642 = 703,
+       against a band starting at 683 — the rail's last 20px sat under the
+       indicator. Subtracting --sab too restores the intended 14px gap
+       above the band. */
+    max-height: calc(100vh - 28px - var(--sat) - var(--sab));
+    max-height: calc(100dvh - 28px - var(--sat) - var(--sab));
     overflow-y: auto;
     background: #fff;
     border: 1px solid #e3e6ea;
@@ -576,7 +659,14 @@ a { color: #2a63b5; }
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 16px;
+  /* T-036 round 2: top was plain 16px on the reasoning that flex-centering
+     keeps content clear of the status bar — true only while the modal is
+     shorter than its 85dvh cap. On a short viewport content hits that cap
+     and the centring margin shrinks below the real top inset, putting the
+     modal header under the status bar. max() on all four sides now: the
+     existing 16px everywhere the inset is 0, the inset itself wherever it
+     exceeds 16px. */
+  padding: max(16px, var(--sat)) max(16px, var(--sar)) max(16px, var(--sab)) max(16px, var(--sal));
 }
 .suggest-modal {
   background: #fff;
@@ -584,7 +674,7 @@ a { color: #2a63b5; }
   border-radius: 10px;
   max-width: 420px;
   width: 100%;
-  max-height: 85vh;
+  max-height: 85dvh;
   overflow-y: auto;
   padding: 20px 20px 20px;
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.3);
