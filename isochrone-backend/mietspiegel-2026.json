@@ -1,0 +1,1908 @@
+{
+  "edition": 2026,
+  "stichtag": "2025-09-01",
+  "source": "https://mietspiegel.berlin.de/wp-content/uploads/2026/05/mietspiegeltabelle2026.pdf",
+  "unit": "EUR/m2/month net cold",
+  "adjustments": {
+    "noHeatingOrBathPre1949Eur": -0.33,
+    "condition": "Deduct from the applicable row's lower/mean/upper for flats bezugsfertig bis 1949 without Sammelheizung and/or without Bad, with WC in the flat (IWC).",
+    "qualifiedMietspiegel": false,
+    "qualifiedMietspiegelNote": "Dieser Abschlag kann nicht dem Anwendungsbereich des qualifizierten Mietspiegels zugeordnet werden (geringe Zahl an Mietwerten)."
+  },
+  "bandNotes": {
+    "1973 bis 1990 Ost": "mit Wendewohnungen",
+    "1991 bis 2001": "ohne Wendewohnungen"
+  },
+  "rows": [
+    {
+      "zeile": 1,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": null,
+      "maxSqm": 35,
+      "lower": 6.53,
+      "mean": 9.58,
+      "upper": 13.43
+    },
+    {
+      "zeile": 2,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 35,
+      "maxSqm": 40,
+      "lower": 7.06,
+      "mean": 10.04,
+      "upper": 14.21
+    },
+    {
+      "zeile": 3,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 40,
+      "maxSqm": 45,
+      "lower": 7.01,
+      "mean": 9.27,
+      "upper": 12.25
+    },
+    {
+      "zeile": 4,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 45,
+      "maxSqm": 50,
+      "lower": 6.8,
+      "mean": 8.01,
+      "upper": 10.75
+    },
+    {
+      "zeile": 5,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 50,
+      "maxSqm": 55,
+      "lower": 6.13,
+      "mean": 8.01,
+      "upper": 11.33
+    },
+    {
+      "zeile": 6,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 55,
+      "maxSqm": 60,
+      "lower": 6.45,
+      "mean": 8.42,
+      "upper": 11.93
+    },
+    {
+      "zeile": 7,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 60,
+      "maxSqm": 65,
+      "lower": 5.91,
+      "mean": 8.27,
+      "upper": 11.85
+    },
+    {
+      "zeile": 8,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 65,
+      "maxSqm": 70,
+      "lower": 5.91,
+      "mean": 8.14,
+      "upper": 12.21
+    },
+    {
+      "zeile": 9,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 70,
+      "maxSqm": 75,
+      "lower": 6.24,
+      "mean": 8.46,
+      "upper": 11.65
+    },
+    {
+      "zeile": 10,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 75,
+      "maxSqm": 85,
+      "lower": 5.91,
+      "mean": 7.56,
+      "upper": 10.76
+    },
+    {
+      "zeile": 11,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 85,
+      "maxSqm": 120,
+      "lower": 5.52,
+      "mean": 7.19,
+      "upper": 10.99
+    },
+    {
+      "zeile": 12,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 120,
+      "maxSqm": null,
+      "lower": 5.38,
+      "mean": 6.48,
+      "upper": 11.24
+    },
+    {
+      "zeile": 13,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1919 bis 1949",
+      "minSqm": null,
+      "maxSqm": 40,
+      "lower": 7.25,
+      "mean": 8.58,
+      "upper": 10.43
+    },
+    {
+      "zeile": 14,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1919 bis 1949",
+      "minSqm": 40,
+      "maxSqm": 50,
+      "lower": 6.57,
+      "mean": 7.82,
+      "upper": 10.01
+    },
+    {
+      "zeile": 15,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1919 bis 1949",
+      "minSqm": 50,
+      "maxSqm": 60,
+      "lower": 6.29,
+      "mean": 7.6,
+      "upper": 9.63
+    },
+    {
+      "zeile": 16,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1919 bis 1949",
+      "minSqm": 60,
+      "maxSqm": null,
+      "lower": 5.78,
+      "mean": 6.99,
+      "upper": 9.12
+    },
+    {
+      "zeile": 17,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1950 bis 1964",
+      "minSqm": null,
+      "maxSqm": 35,
+      "lower": 6.64,
+      "mean": 8.07,
+      "upper": 10.23
+    },
+    {
+      "zeile": 18,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1950 bis 1964",
+      "minSqm": 35,
+      "maxSqm": 40,
+      "lower": 6.61,
+      "mean": 7.72,
+      "upper": 9.97
+    },
+    {
+      "zeile": 19,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1950 bis 1964",
+      "minSqm": 40,
+      "maxSqm": 55,
+      "lower": 6.23,
+      "mean": 7.32,
+      "upper": 9.53
+    },
+    {
+      "zeile": 20,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1950 bis 1964",
+      "minSqm": 55,
+      "maxSqm": 60,
+      "lower": 6.01,
+      "mean": 6.99,
+      "upper": 8.89
+    },
+    {
+      "zeile": 21,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1950 bis 1964",
+      "minSqm": 60,
+      "maxSqm": null,
+      "lower": 5.77,
+      "mean": 6.63,
+      "upper": 8
+    },
+    {
+      "zeile": 22,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1965 bis 1972",
+      "minSqm": null,
+      "maxSqm": 35,
+      "lower": 6.64,
+      "mean": 8.07,
+      "upper": 10.23
+    },
+    {
+      "zeile": 23,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1965 bis 1972",
+      "minSqm": 35,
+      "maxSqm": 40,
+      "lower": 6.61,
+      "mean": 7.72,
+      "upper": 9.97
+    },
+    {
+      "zeile": 24,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1965 bis 1972",
+      "minSqm": 40,
+      "maxSqm": 55,
+      "lower": 6.23,
+      "mean": 7.32,
+      "upper": 9.53
+    },
+    {
+      "zeile": 25,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1965 bis 1972",
+      "minSqm": 55,
+      "maxSqm": 60,
+      "lower": 6.01,
+      "mean": 6.99,
+      "upper": 8.89
+    },
+    {
+      "zeile": 26,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1965 bis 1972",
+      "minSqm": 60,
+      "maxSqm": 85,
+      "lower": 5.54,
+      "mean": 6.35,
+      "upper": 7.55
+    },
+    {
+      "zeile": 27,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1965 bis 1972",
+      "minSqm": 85,
+      "maxSqm": null,
+      "lower": 5.45,
+      "mean": 6.05,
+      "upper": 6.97
+    },
+    {
+      "zeile": 28,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1973 bis 1985 West",
+      "minSqm": null,
+      "maxSqm": 35,
+      "lower": 6.64,
+      "mean": 8.07,
+      "upper": 10.23
+    },
+    {
+      "zeile": 29,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1973 bis 1985 West",
+      "minSqm": 35,
+      "maxSqm": 40,
+      "lower": 6.61,
+      "mean": 7.72,
+      "upper": 9.97
+    },
+    {
+      "zeile": 30,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1973 bis 1985 West",
+      "minSqm": 40,
+      "maxSqm": 55,
+      "lower": 6.23,
+      "mean": 7.32,
+      "upper": 9.53
+    },
+    {
+      "zeile": 31,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1973 bis 1985 West",
+      "minSqm": 55,
+      "maxSqm": 60,
+      "lower": 6.01,
+      "mean": 6.99,
+      "upper": 8.89
+    },
+    {
+      "zeile": 32,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1973 bis 1985 West",
+      "minSqm": 60,
+      "maxSqm": 70,
+      "lower": 6.19,
+      "mean": 7.03,
+      "upper": 9.3
+    },
+    {
+      "zeile": 33,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1973 bis 1985 West",
+      "minSqm": 70,
+      "maxSqm": 90,
+      "lower": 6.18,
+      "mean": 7.26,
+      "upper": 8.43
+    },
+    {
+      "zeile": 34,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1973 bis 1985 West",
+      "minSqm": 90,
+      "maxSqm": null,
+      "lower": 5.72,
+      "mean": 6.86,
+      "upper": 8.76
+    },
+    {
+      "zeile": 35,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1986 bis 1990 West",
+      "minSqm": null,
+      "maxSqm": 55,
+      "lower": 7.05,
+      "mean": 9.07,
+      "upper": 10.93
+    },
+    {
+      "zeile": 36,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1986 bis 1990 West",
+      "minSqm": 55,
+      "maxSqm": 60,
+      "lower": 7.37,
+      "mean": 9.36,
+      "upper": 11.36
+    },
+    {
+      "zeile": 37,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1986 bis 1990 West",
+      "minSqm": 60,
+      "maxSqm": 65,
+      "lower": 6.69,
+      "mean": 9.16,
+      "upper": 11.94
+    },
+    {
+      "zeile": 38,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1986 bis 1990 West",
+      "minSqm": 65,
+      "maxSqm": 70,
+      "lower": 5.62,
+      "mean": 8.9,
+      "upper": 10.93
+    },
+    {
+      "zeile": 39,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1986 bis 1990 West",
+      "minSqm": 70,
+      "maxSqm": 75,
+      "lower": 6.59,
+      "mean": 8.92,
+      "upper": 10.19
+    },
+    {
+      "zeile": 40,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1986 bis 1990 West",
+      "minSqm": 75,
+      "maxSqm": 85,
+      "lower": 7.1,
+      "mean": 8.63,
+      "upper": 10.04
+    },
+    {
+      "zeile": 41,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1986 bis 1990 West",
+      "minSqm": 85,
+      "maxSqm": 95,
+      "lower": 5.72,
+      "mean": 8.47,
+      "upper": 9.86
+    },
+    {
+      "zeile": 42,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1986 bis 1990 West",
+      "minSqm": 95,
+      "maxSqm": null,
+      "lower": 6.6,
+      "mean": 8.75,
+      "upper": 10.81
+    },
+    {
+      "zeile": 43,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1973 bis 1990 Ost",
+      "minSqm": null,
+      "maxSqm": 40,
+      "lower": 6.82,
+      "mean": 7.78,
+      "upper": 9.01
+    },
+    {
+      "zeile": 44,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1973 bis 1990 Ost",
+      "minSqm": 40,
+      "maxSqm": 60,
+      "lower": 6.07,
+      "mean": 6.67,
+      "upper": 7.6
+    },
+    {
+      "zeile": 45,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1973 bis 1990 Ost",
+      "minSqm": 60,
+      "maxSqm": 100,
+      "lower": 5.2,
+      "mean": 5.77,
+      "upper": 6.36
+    },
+    {
+      "zeile": 46,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1973 bis 1990 Ost",
+      "minSqm": 100,
+      "maxSqm": null,
+      "lower": 5.11,
+      "mean": 5.6,
+      "upper": 6
+    },
+    {
+      "zeile": 47,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1991 bis 2001",
+      "minSqm": null,
+      "maxSqm": 55,
+      "lower": 7.05,
+      "mean": 9.07,
+      "upper": 10.93
+    },
+    {
+      "zeile": 48,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1991 bis 2001",
+      "minSqm": 55,
+      "maxSqm": 60,
+      "lower": 7.37,
+      "mean": 9.36,
+      "upper": 11.36
+    },
+    {
+      "zeile": 49,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1991 bis 2001",
+      "minSqm": 60,
+      "maxSqm": 65,
+      "lower": 6.69,
+      "mean": 9.16,
+      "upper": 11.94
+    },
+    {
+      "zeile": 50,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1991 bis 2001",
+      "minSqm": 65,
+      "maxSqm": 70,
+      "lower": 5.62,
+      "mean": 8.9,
+      "upper": 10.93
+    },
+    {
+      "zeile": 51,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1991 bis 2001",
+      "minSqm": 70,
+      "maxSqm": 75,
+      "lower": 6.59,
+      "mean": 8.92,
+      "upper": 10.19
+    },
+    {
+      "zeile": 52,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1991 bis 2001",
+      "minSqm": 75,
+      "maxSqm": 85,
+      "lower": 7.1,
+      "mean": 8.63,
+      "upper": 10.04
+    },
+    {
+      "zeile": 53,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1991 bis 2001",
+      "minSqm": 85,
+      "maxSqm": 95,
+      "lower": 5.72,
+      "mean": 8.47,
+      "upper": 9.86
+    },
+    {
+      "zeile": 54,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "1991 bis 2001",
+      "minSqm": 95,
+      "maxSqm": null,
+      "lower": 6.6,
+      "mean": 8.75,
+      "upper": 10.81
+    },
+    {
+      "zeile": 55,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "2002 bis 2009",
+      "minSqm": null,
+      "maxSqm": 55,
+      "lower": 7.05,
+      "mean": 9.07,
+      "upper": 10.93
+    },
+    {
+      "zeile": 56,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "2002 bis 2009",
+      "minSqm": 55,
+      "maxSqm": 60,
+      "lower": 7.37,
+      "mean": 9.36,
+      "upper": 11.36
+    },
+    {
+      "zeile": 57,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "2002 bis 2009",
+      "minSqm": 60,
+      "maxSqm": 65,
+      "lower": 6.69,
+      "mean": 9.16,
+      "upper": 11.94
+    },
+    {
+      "zeile": 58,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "2002 bis 2009",
+      "minSqm": 65,
+      "maxSqm": 70,
+      "lower": 5.62,
+      "mean": 8.9,
+      "upper": 10.93
+    },
+    {
+      "zeile": 59,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "2002 bis 2009",
+      "minSqm": 70,
+      "maxSqm": 75,
+      "lower": 6.59,
+      "mean": 8.92,
+      "upper": 10.19
+    },
+    {
+      "zeile": 60,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "2002 bis 2009",
+      "minSqm": 75,
+      "maxSqm": 85,
+      "lower": 7.1,
+      "mean": 8.63,
+      "upper": 10.04
+    },
+    {
+      "zeile": 61,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "2002 bis 2009",
+      "minSqm": 85,
+      "maxSqm": 95,
+      "lower": 5.72,
+      "mean": 8.47,
+      "upper": 9.86
+    },
+    {
+      "zeile": 62,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "2002 bis 2009",
+      "minSqm": 95,
+      "maxSqm": null,
+      "lower": 6.6,
+      "mean": 8.75,
+      "upper": 10.81
+    },
+    {
+      "zeile": 63,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "2010 bis 2015",
+      "minSqm": 0,
+      "maxSqm": null,
+      "lower": 7.5,
+      "mean": 10.38,
+      "upper": 15.91
+    },
+    {
+      "zeile": 64,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "2016 bis 2019",
+      "minSqm": 0,
+      "maxSqm": null,
+      "lower": 9.79,
+      "mean": 12.77,
+      "upper": 18.19
+    },
+    {
+      "zeile": 65,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "2020 bis 2024",
+      "minSqm": null,
+      "maxSqm": 60,
+      "lower": 9.99,
+      "mean": 15.25,
+      "upper": 22.7
+    },
+    {
+      "zeile": 66,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "2020 bis 2024",
+      "minSqm": 60,
+      "maxSqm": 80,
+      "lower": 9.37,
+      "mean": 15.17,
+      "upper": 18.39
+    },
+    {
+      "zeile": 67,
+      "wohnlage": "einfach",
+      "bezugsfertigkeit": "2020 bis 2024",
+      "minSqm": 80,
+      "maxSqm": null,
+      "lower": 9.11,
+      "mean": 14.11,
+      "upper": 19.28
+    },
+    {
+      "zeile": 68,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": null,
+      "maxSqm": 35,
+      "lower": 8.07,
+      "mean": 11.05,
+      "upper": 14.35
+    },
+    {
+      "zeile": 69,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 35,
+      "maxSqm": 40,
+      "lower": 8.44,
+      "mean": 11.06,
+      "upper": 15.13
+    },
+    {
+      "zeile": 70,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 40,
+      "maxSqm": 65,
+      "lower": 6.46,
+      "mean": 8.49,
+      "upper": 12.59
+    },
+    {
+      "zeile": 71,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 65,
+      "maxSqm": 70,
+      "lower": 6.45,
+      "mean": 9,
+      "upper": 11.7
+    },
+    {
+      "zeile": 72,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 70,
+      "maxSqm": 80,
+      "lower": 6.09,
+      "mean": 7.9,
+      "upper": 11.7
+    },
+    {
+      "zeile": 73,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 80,
+      "maxSqm": 90,
+      "lower": 6.66,
+      "mean": 8.27,
+      "upper": 11.73
+    },
+    {
+      "zeile": 74,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 90,
+      "maxSqm": 100,
+      "lower": 5.95,
+      "mean": 7.65,
+      "upper": 11.52
+    },
+    {
+      "zeile": 75,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 100,
+      "maxSqm": 105,
+      "lower": 5.95,
+      "mean": 7.87,
+      "upper": 12.63
+    },
+    {
+      "zeile": 76,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 105,
+      "maxSqm": 120,
+      "lower": 5.48,
+      "mean": 7.29,
+      "upper": 11.43
+    },
+    {
+      "zeile": 77,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 120,
+      "maxSqm": null,
+      "lower": 5.75,
+      "mean": 7.56,
+      "upper": 11.21
+    },
+    {
+      "zeile": 78,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1919 bis 1949",
+      "minSqm": null,
+      "maxSqm": 40,
+      "lower": 7.74,
+      "mean": 8.83,
+      "upper": 10.51
+    },
+    {
+      "zeile": 79,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1919 bis 1949",
+      "minSqm": 40,
+      "maxSqm": 45,
+      "lower": 7.03,
+      "mean": 8.28,
+      "upper": 10.38
+    },
+    {
+      "zeile": 80,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1919 bis 1949",
+      "minSqm": 45,
+      "maxSqm": 60,
+      "lower": 6.32,
+      "mean": 7.73,
+      "upper": 9.8
+    },
+    {
+      "zeile": 81,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1919 bis 1949",
+      "minSqm": 60,
+      "maxSqm": null,
+      "lower": 5.9,
+      "mean": 7.3,
+      "upper": 9.55
+    },
+    {
+      "zeile": 82,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1950 bis 1964",
+      "minSqm": null,
+      "maxSqm": 35,
+      "lower": 6.55,
+      "mean": 8.54,
+      "upper": 10.62
+    },
+    {
+      "zeile": 83,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1950 bis 1964",
+      "minSqm": 35,
+      "maxSqm": 40,
+      "lower": 6.6,
+      "mean": 7.78,
+      "upper": 10.49
+    },
+    {
+      "zeile": 84,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1950 bis 1964",
+      "minSqm": 40,
+      "maxSqm": 45,
+      "lower": 6.7,
+      "mean": 7.72,
+      "upper": 10.01
+    },
+    {
+      "zeile": 85,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1950 bis 1964",
+      "minSqm": 45,
+      "maxSqm": null,
+      "lower": 5.9,
+      "mean": 7.08,
+      "upper": 9.25
+    },
+    {
+      "zeile": 86,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1965 bis 1972",
+      "minSqm": null,
+      "maxSqm": 35,
+      "lower": 6.8,
+      "mean": 8.1,
+      "upper": 13.01
+    },
+    {
+      "zeile": 87,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1965 bis 1972",
+      "minSqm": 35,
+      "maxSqm": 40,
+      "lower": 6.6,
+      "mean": 7.78,
+      "upper": 10.49
+    },
+    {
+      "zeile": 88,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1965 bis 1972",
+      "minSqm": 40,
+      "maxSqm": 45,
+      "lower": 6.7,
+      "mean": 7.72,
+      "upper": 10.01
+    },
+    {
+      "zeile": 89,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1965 bis 1972",
+      "minSqm": 45,
+      "maxSqm": null,
+      "lower": 5.77,
+      "mean": 6.65,
+      "upper": 8.74
+    },
+    {
+      "zeile": 90,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1973 bis 1985 West",
+      "minSqm": null,
+      "maxSqm": 35,
+      "lower": 6.8,
+      "mean": 8.1,
+      "upper": 13.01
+    },
+    {
+      "zeile": 91,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1973 bis 1985 West",
+      "minSqm": 35,
+      "maxSqm": 40,
+      "lower": 6.6,
+      "mean": 7.78,
+      "upper": 10.49
+    },
+    {
+      "zeile": 92,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1973 bis 1985 West",
+      "minSqm": 40,
+      "maxSqm": 45,
+      "lower": 6.7,
+      "mean": 7.72,
+      "upper": 10.01
+    },
+    {
+      "zeile": 93,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1973 bis 1985 West",
+      "minSqm": 45,
+      "maxSqm": 70,
+      "lower": 7.18,
+      "mean": 8.21,
+      "upper": 9.76
+    },
+    {
+      "zeile": 94,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1973 bis 1985 West",
+      "minSqm": 70,
+      "maxSqm": 85,
+      "lower": 6.65,
+      "mean": 8.09,
+      "upper": 10.3
+    },
+    {
+      "zeile": 95,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1973 bis 1985 West",
+      "minSqm": 85,
+      "maxSqm": null,
+      "lower": 6.79,
+      "mean": 8.35,
+      "upper": 10.7
+    },
+    {
+      "zeile": 96,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1986 bis 1990 West",
+      "minSqm": null,
+      "maxSqm": 50,
+      "lower": 8.04,
+      "mean": 10.03,
+      "upper": 12.25
+    },
+    {
+      "zeile": 97,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1986 bis 1990 West",
+      "minSqm": 50,
+      "maxSqm": 55,
+      "lower": 7.98,
+      "mean": 9.61,
+      "upper": 10.76
+    },
+    {
+      "zeile": 98,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1986 bis 1990 West",
+      "minSqm": 55,
+      "maxSqm": 60,
+      "lower": 8.87,
+      "mean": 9.97,
+      "upper": 11.49
+    },
+    {
+      "zeile": 99,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1986 bis 1990 West",
+      "minSqm": 60,
+      "maxSqm": 65,
+      "lower": 7.93,
+      "mean": 9.56,
+      "upper": 12.17
+    },
+    {
+      "zeile": 100,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1986 bis 1990 West",
+      "minSqm": 65,
+      "maxSqm": 70,
+      "lower": 7.79,
+      "mean": 9.8,
+      "upper": 11.36
+    },
+    {
+      "zeile": 101,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1986 bis 1990 West",
+      "minSqm": 70,
+      "maxSqm": 105,
+      "lower": 7.18,
+      "mean": 9.22,
+      "upper": 11.31
+    },
+    {
+      "zeile": 102,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1986 bis 1990 West",
+      "minSqm": 105,
+      "maxSqm": null,
+      "lower": 7.87,
+      "mean": 9.8,
+      "upper": 11.58
+    },
+    {
+      "zeile": 103,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1973 bis 1990 Ost",
+      "minSqm": null,
+      "maxSqm": 40,
+      "lower": 6.63,
+      "mean": 7.64,
+      "upper": 9.84
+    },
+    {
+      "zeile": 104,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1973 bis 1990 Ost",
+      "minSqm": 40,
+      "maxSqm": 60,
+      "lower": 5.92,
+      "mean": 6.51,
+      "upper": 7.71
+    },
+    {
+      "zeile": 105,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1973 bis 1990 Ost",
+      "minSqm": 60,
+      "maxSqm": null,
+      "lower": 5.3,
+      "mean": 5.89,
+      "upper": 6.63
+    },
+    {
+      "zeile": 106,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1991 bis 2001",
+      "minSqm": null,
+      "maxSqm": 50,
+      "lower": 8.04,
+      "mean": 10.03,
+      "upper": 12.25
+    },
+    {
+      "zeile": 107,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1991 bis 2001",
+      "minSqm": 50,
+      "maxSqm": 55,
+      "lower": 7.98,
+      "mean": 9.61,
+      "upper": 10.76
+    },
+    {
+      "zeile": 108,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1991 bis 2001",
+      "minSqm": 55,
+      "maxSqm": 60,
+      "lower": 8.87,
+      "mean": 9.97,
+      "upper": 11.49
+    },
+    {
+      "zeile": 109,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1991 bis 2001",
+      "minSqm": 60,
+      "maxSqm": 65,
+      "lower": 7.93,
+      "mean": 9.56,
+      "upper": 12.17
+    },
+    {
+      "zeile": 110,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1991 bis 2001",
+      "minSqm": 65,
+      "maxSqm": 70,
+      "lower": 7.79,
+      "mean": 9.8,
+      "upper": 11.36
+    },
+    {
+      "zeile": 111,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1991 bis 2001",
+      "minSqm": 70,
+      "maxSqm": 75,
+      "lower": 8.05,
+      "mean": 9.54,
+      "upper": 10.7
+    },
+    {
+      "zeile": 112,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1991 bis 2001",
+      "minSqm": 75,
+      "maxSqm": 105,
+      "lower": 7.91,
+      "mean": 9.38,
+      "upper": 10.92
+    },
+    {
+      "zeile": 113,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "1991 bis 2001",
+      "minSqm": 105,
+      "maxSqm": null,
+      "lower": 7.87,
+      "mean": 9.8,
+      "upper": 11.58
+    },
+    {
+      "zeile": 114,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "2002 bis 2009",
+      "minSqm": null,
+      "maxSqm": 50,
+      "lower": 8.04,
+      "mean": 10.03,
+      "upper": 12.25
+    },
+    {
+      "zeile": 115,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "2002 bis 2009",
+      "minSqm": 50,
+      "maxSqm": 55,
+      "lower": 7.98,
+      "mean": 9.61,
+      "upper": 10.76
+    },
+    {
+      "zeile": 116,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "2002 bis 2009",
+      "minSqm": 55,
+      "maxSqm": 60,
+      "lower": 8.87,
+      "mean": 9.97,
+      "upper": 11.49
+    },
+    {
+      "zeile": 117,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "2002 bis 2009",
+      "minSqm": 60,
+      "maxSqm": 65,
+      "lower": 7.93,
+      "mean": 9.56,
+      "upper": 12.17
+    },
+    {
+      "zeile": 118,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "2002 bis 2009",
+      "minSqm": 65,
+      "maxSqm": 70,
+      "lower": 7.79,
+      "mean": 9.8,
+      "upper": 11.36
+    },
+    {
+      "zeile": 119,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "2002 bis 2009",
+      "minSqm": 70,
+      "maxSqm": null,
+      "lower": 6.89,
+      "mean": 10.61,
+      "upper": 15.04
+    },
+    {
+      "zeile": 120,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "2010 bis 2015",
+      "minSqm": null,
+      "maxSqm": 70,
+      "lower": 9.19,
+      "mean": 12.6,
+      "upper": 17.6
+    },
+    {
+      "zeile": 121,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "2010 bis 2015",
+      "minSqm": 70,
+      "maxSqm": 95,
+      "lower": 8.78,
+      "mean": 11.39,
+      "upper": 15.64
+    },
+    {
+      "zeile": 122,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "2010 bis 2015",
+      "minSqm": 95,
+      "maxSqm": null,
+      "lower": 9.88,
+      "mean": 12.54,
+      "upper": 18.79
+    },
+    {
+      "zeile": 123,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "2016 bis 2019",
+      "minSqm": null,
+      "maxSqm": 70,
+      "lower": 10.08,
+      "mean": 13.48,
+      "upper": 18.64
+    },
+    {
+      "zeile": 124,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "2016 bis 2019",
+      "minSqm": 70,
+      "maxSqm": 95,
+      "lower": 10.24,
+      "mean": 14.42,
+      "upper": 17.68
+    },
+    {
+      "zeile": 125,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "2016 bis 2019",
+      "minSqm": 95,
+      "maxSqm": null,
+      "lower": 9.24,
+      "mean": 13.18,
+      "upper": 20.88
+    },
+    {
+      "zeile": 126,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "2020 bis 2024",
+      "minSqm": null,
+      "maxSqm": 50,
+      "lower": 12.52,
+      "mean": 19.04,
+      "upper": 26.81
+    },
+    {
+      "zeile": 127,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "2020 bis 2024",
+      "minSqm": 50,
+      "maxSqm": 65,
+      "lower": 10.78,
+      "mean": 19.92,
+      "upper": 24.04
+    },
+    {
+      "zeile": 128,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "2020 bis 2024",
+      "minSqm": 65,
+      "maxSqm": 95,
+      "lower": 12.48,
+      "mean": 17.33,
+      "upper": 22.4
+    },
+    {
+      "zeile": 129,
+      "wohnlage": "mittel",
+      "bezugsfertigkeit": "2020 bis 2024",
+      "minSqm": 95,
+      "maxSqm": null,
+      "lower": 11.79,
+      "mean": 15.15,
+      "upper": 21.02
+    },
+    {
+      "zeile": 130,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": null,
+      "maxSqm": 35,
+      "lower": 7.62,
+      "mean": 11.75,
+      "upper": 16.43
+    },
+    {
+      "zeile": 131,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 35,
+      "maxSqm": 40,
+      "lower": 8.57,
+      "mean": 11.67,
+      "upper": 14.92
+    },
+    {
+      "zeile": 132,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 40,
+      "maxSqm": 45,
+      "lower": 7.2,
+      "mean": 9.54,
+      "upper": 14.4
+    },
+    {
+      "zeile": 133,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 45,
+      "maxSqm": 50,
+      "lower": 6.7,
+      "mean": 9.64,
+      "upper": 13.32
+    },
+    {
+      "zeile": 134,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 50,
+      "maxSqm": 60,
+      "lower": 6.89,
+      "mean": 9.03,
+      "upper": 13.16
+    },
+    {
+      "zeile": 135,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 60,
+      "maxSqm": 70,
+      "lower": 7.09,
+      "mean": 9.46,
+      "upper": 13.54
+    },
+    {
+      "zeile": 136,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 70,
+      "maxSqm": 80,
+      "lower": 6.25,
+      "mean": 8.97,
+      "upper": 13.66
+    },
+    {
+      "zeile": 137,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 80,
+      "maxSqm": 90,
+      "lower": 6.75,
+      "mean": 8.8,
+      "upper": 12.17
+    },
+    {
+      "zeile": 138,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 90,
+      "maxSqm": 110,
+      "lower": 6.6,
+      "mean": 8.45,
+      "upper": 12.99
+    },
+    {
+      "zeile": 139,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "bis 1918",
+      "minSqm": 110,
+      "maxSqm": null,
+      "lower": 6.3,
+      "mean": 8.84,
+      "upper": 13.24
+    },
+    {
+      "zeile": 140,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1919 bis 1949",
+      "minSqm": null,
+      "maxSqm": 35,
+      "lower": 7.19,
+      "mean": 9.47,
+      "upper": 14.79
+    },
+    {
+      "zeile": 141,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1919 bis 1949",
+      "minSqm": 35,
+      "maxSqm": 40,
+      "lower": 7.4,
+      "mean": 9.07,
+      "upper": 11.42
+    },
+    {
+      "zeile": 142,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1919 bis 1949",
+      "minSqm": 40,
+      "maxSqm": 45,
+      "lower": 6.8,
+      "mean": 8.54,
+      "upper": 11.1
+    },
+    {
+      "zeile": 143,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1919 bis 1949",
+      "minSqm": 45,
+      "maxSqm": 65,
+      "lower": 6.84,
+      "mean": 8.82,
+      "upper": 11.74
+    },
+    {
+      "zeile": 144,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1919 bis 1949",
+      "minSqm": 65,
+      "maxSqm": null,
+      "lower": 6.37,
+      "mean": 8.11,
+      "upper": 11.93
+    },
+    {
+      "zeile": 145,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1950 bis 1964",
+      "minSqm": null,
+      "maxSqm": 35,
+      "lower": 7.19,
+      "mean": 9.47,
+      "upper": 14.79
+    },
+    {
+      "zeile": 146,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1950 bis 1964",
+      "minSqm": 35,
+      "maxSqm": 40,
+      "lower": 7.4,
+      "mean": 9.07,
+      "upper": 11.42
+    },
+    {
+      "zeile": 147,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1950 bis 1964",
+      "minSqm": 40,
+      "maxSqm": 45,
+      "lower": 6.8,
+      "mean": 8.54,
+      "upper": 11.1
+    },
+    {
+      "zeile": 148,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1950 bis 1964",
+      "minSqm": 45,
+      "maxSqm": 90,
+      "lower": 6.07,
+      "mean": 7.56,
+      "upper": 10.92
+    },
+    {
+      "zeile": 149,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1950 bis 1964",
+      "minSqm": 90,
+      "maxSqm": null,
+      "lower": 7.49,
+      "mean": 10,
+      "upper": 12.78
+    },
+    {
+      "zeile": 150,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1965 bis 1972",
+      "minSqm": null,
+      "maxSqm": 35,
+      "lower": 7.19,
+      "mean": 9.47,
+      "upper": 14.79
+    },
+    {
+      "zeile": 151,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1965 bis 1972",
+      "minSqm": 35,
+      "maxSqm": 40,
+      "lower": 7.4,
+      "mean": 9.07,
+      "upper": 11.42
+    },
+    {
+      "zeile": 152,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1965 bis 1972",
+      "minSqm": 40,
+      "maxSqm": 45,
+      "lower": 6.8,
+      "mean": 8.54,
+      "upper": 11.1
+    },
+    {
+      "zeile": 153,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1965 bis 1972",
+      "minSqm": 45,
+      "maxSqm": 90,
+      "lower": 6.07,
+      "mean": 7.56,
+      "upper": 10.92
+    },
+    {
+      "zeile": 154,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1965 bis 1972",
+      "minSqm": 90,
+      "maxSqm": null,
+      "lower": 7.49,
+      "mean": 10,
+      "upper": 12.78
+    },
+    {
+      "zeile": 155,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1973 bis 1985 West",
+      "minSqm": null,
+      "maxSqm": 50,
+      "lower": 6.96,
+      "mean": 9.06,
+      "upper": 11.98
+    },
+    {
+      "zeile": 156,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1973 bis 1985 West",
+      "minSqm": 50,
+      "maxSqm": 85,
+      "lower": 7.12,
+      "mean": 9.42,
+      "upper": 12.41
+    },
+    {
+      "zeile": 157,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1973 bis 1985 West",
+      "minSqm": 85,
+      "maxSqm": null,
+      "lower": 7.98,
+      "mean": 10.39,
+      "upper": 13.8
+    },
+    {
+      "zeile": 158,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1986 bis 1990 West",
+      "minSqm": null,
+      "maxSqm": 50,
+      "lower": 8.33,
+      "mean": 11.13,
+      "upper": 14.96
+    },
+    {
+      "zeile": 159,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1986 bis 1990 West",
+      "minSqm": 50,
+      "maxSqm": 60,
+      "lower": 8.26,
+      "mean": 10.34,
+      "upper": 14.45
+    },
+    {
+      "zeile": 160,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1986 bis 1990 West",
+      "minSqm": 60,
+      "maxSqm": 65,
+      "lower": 8.74,
+      "mean": 10.57,
+      "upper": 12.75
+    },
+    {
+      "zeile": 161,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1986 bis 1990 West",
+      "minSqm": 65,
+      "maxSqm": 75,
+      "lower": 7.52,
+      "mean": 11.06,
+      "upper": 13.21
+    },
+    {
+      "zeile": 162,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1986 bis 1990 West",
+      "minSqm": 75,
+      "maxSqm": 105,
+      "lower": 8.4,
+      "mean": 10.63,
+      "upper": 13.96
+    },
+    {
+      "zeile": 163,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1986 bis 1990 West",
+      "minSqm": 105,
+      "maxSqm": 125,
+      "lower": 8.82,
+      "mean": 12.15,
+      "upper": 16.1
+    },
+    {
+      "zeile": 164,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1986 bis 1990 West",
+      "minSqm": 125,
+      "maxSqm": null,
+      "lower": 8.07,
+      "mean": 12.9,
+      "upper": 16.77
+    },
+    {
+      "zeile": 165,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1973 bis 1990 Ost",
+      "minSqm": null,
+      "maxSqm": 40,
+      "lower": 7.03,
+      "mean": 7.79,
+      "upper": 9.2
+    },
+    {
+      "zeile": 166,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1973 bis 1990 Ost",
+      "minSqm": 40,
+      "maxSqm": 60,
+      "lower": 6.3,
+      "mean": 7.07,
+      "upper": 9.28
+    },
+    {
+      "zeile": 167,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1973 bis 1990 Ost",
+      "minSqm": 60,
+      "maxSqm": 85,
+      "lower": 5.51,
+      "mean": 6.18,
+      "upper": 7.23
+    },
+    {
+      "zeile": 168,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1973 bis 1990 Ost",
+      "minSqm": 85,
+      "maxSqm": null,
+      "lower": 5.26,
+      "mean": 6.31,
+      "upper": 9.65
+    },
+    {
+      "zeile": 169,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1991 bis 2001",
+      "minSqm": null,
+      "maxSqm": 50,
+      "lower": 8.33,
+      "mean": 11.13,
+      "upper": 14.96
+    },
+    {
+      "zeile": 170,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1991 bis 2001",
+      "minSqm": 50,
+      "maxSqm": 60,
+      "lower": 8.26,
+      "mean": 10.34,
+      "upper": 14.45
+    },
+    {
+      "zeile": 171,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1991 bis 2001",
+      "minSqm": 60,
+      "maxSqm": 65,
+      "lower": 8.74,
+      "mean": 10.57,
+      "upper": 12.75
+    },
+    {
+      "zeile": 172,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1991 bis 2001",
+      "minSqm": 65,
+      "maxSqm": 75,
+      "lower": 7.52,
+      "mean": 11.06,
+      "upper": 13.21
+    },
+    {
+      "zeile": 173,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1991 bis 2001",
+      "minSqm": 75,
+      "maxSqm": 105,
+      "lower": 8.4,
+      "mean": 10.63,
+      "upper": 13.96
+    },
+    {
+      "zeile": 174,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1991 bis 2001",
+      "minSqm": 105,
+      "maxSqm": 125,
+      "lower": 8.82,
+      "mean": 12.15,
+      "upper": 16.1
+    },
+    {
+      "zeile": 175,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "1991 bis 2001",
+      "minSqm": 125,
+      "maxSqm": null,
+      "lower": 8.07,
+      "mean": 12.9,
+      "upper": 16.77
+    },
+    {
+      "zeile": 176,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "2002 bis 2009",
+      "minSqm": null,
+      "maxSqm": 75,
+      "lower": 8.62,
+      "mean": 10.91,
+      "upper": 13.92
+    },
+    {
+      "zeile": 177,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "2002 bis 2009",
+      "minSqm": 75,
+      "maxSqm": 105,
+      "lower": 7.88,
+      "mean": 11.85,
+      "upper": 16.83
+    },
+    {
+      "zeile": 178,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "2002 bis 2009",
+      "minSqm": 105,
+      "maxSqm": 125,
+      "lower": 8.82,
+      "mean": 12.15,
+      "upper": 16.1
+    },
+    {
+      "zeile": 179,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "2002 bis 2009",
+      "minSqm": 125,
+      "maxSqm": null,
+      "lower": 8.07,
+      "mean": 12.9,
+      "upper": 16.77
+    },
+    {
+      "zeile": 180,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "2010 bis 2015",
+      "minSqm": null,
+      "maxSqm": 60,
+      "lower": 8.99,
+      "mean": 15.34,
+      "upper": 19.32
+    },
+    {
+      "zeile": 181,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "2010 bis 2015",
+      "minSqm": 60,
+      "maxSqm": 85,
+      "lower": 9.99,
+      "mean": 15.37,
+      "upper": 17.65
+    },
+    {
+      "zeile": 182,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "2010 bis 2015",
+      "minSqm": 85,
+      "maxSqm": 110,
+      "lower": 8.89,
+      "mean": 13.69,
+      "upper": 19.16
+    },
+    {
+      "zeile": 183,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "2010 bis 2015",
+      "minSqm": 110,
+      "maxSqm": null,
+      "lower": 11.26,
+      "mean": 15.15,
+      "upper": 17.82
+    },
+    {
+      "zeile": 184,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "2016 bis 2019",
+      "minSqm": null,
+      "maxSqm": 60,
+      "lower": 12.06,
+      "mean": 17.23,
+      "upper": 26.05
+    },
+    {
+      "zeile": 185,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "2016 bis 2019",
+      "minSqm": 60,
+      "maxSqm": 85,
+      "lower": 12.45,
+      "mean": 18.94,
+      "upper": 23.43
+    },
+    {
+      "zeile": 186,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "2016 bis 2019",
+      "minSqm": 85,
+      "maxSqm": null,
+      "lower": 10.91,
+      "mean": 17.47,
+      "upper": 21
+    },
+    {
+      "zeile": 187,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "2020 bis 2024",
+      "minSqm": null,
+      "maxSqm": 60,
+      "lower": 11.31,
+      "mean": 22.59,
+      "upper": 27.84
+    },
+    {
+      "zeile": 188,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "2020 bis 2024",
+      "minSqm": 60,
+      "maxSqm": 85,
+      "lower": 11.25,
+      "mean": 19.54,
+      "upper": 26.69
+    },
+    {
+      "zeile": 189,
+      "wohnlage": "gut",
+      "bezugsfertigkeit": "2020 bis 2024",
+      "minSqm": 85,
+      "maxSqm": null,
+      "lower": 10.28,
+      "mean": 18.42,
+      "upper": 23.49
+    }
+  ]
+}
