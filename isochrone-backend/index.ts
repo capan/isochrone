@@ -1657,7 +1657,23 @@ app.get("/api/amenities", async (req: any, res: any) => {
   // is only a safety valve.
   const limit = Math.min(3000, parseInt(req.query.limit ?? "3000", 10) || 3000);
 
-  const { schema, poisLoaded } = await resolveSchema(lat, lon);
+  const { schema, matched, poisLoaded } = await resolveSchema(lat, lon);
+  // `matched` false means the fallback DEFAULT_SCHEMA answered instead of a
+  // real area — same condition /api/isochrone reports as "outside coverage".
+  // Running the reachability query anyway doesn't error: the small maxCost
+  // radius guarantees no reachable edges against a graph that may be states
+  // away, so the endpoint used to return a clean 200 with count:0 — "nothing
+  // near you" for ground we have no data about at all, indistinguishable from
+  // a genuinely quiet block in a city we do cover. Those are different
+  // answers; say which one this is before spending a query on it.
+  if (!matched) {
+    return res.status(400).json({
+      error: "outside coverage",
+      detail: `This point is served by ${schema}, whose graph spans ${await getGraphExtent(
+        schema
+      )}, a bounding rectangle rather than the shape that routes. POST /api/areas with a bbox to import coverage here.`,
+    });
+  }
   // `poi3` since the vertex snap became profile-aware: a click that had landed
   // on a cycleway-only vertex cached an empty place list on foot, and those are
   // the entries the fix repairs. The original `poi2` bump was for poisLoaded
