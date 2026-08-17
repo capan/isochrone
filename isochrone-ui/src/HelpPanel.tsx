@@ -90,7 +90,11 @@ export default function HelpPanel({
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        padding: 16,
+        // T-036 round 2: same treatment as .suggest-modal-backdrop in
+        // index.css — all four sides use max() so none shrinks below the
+        // device inset once the modal hits its 85dvh cap on a short
+        // viewport, where flex-centring alone no longer keeps it clear.
+        padding: "max(16px, var(--sat)) max(16px, var(--sar)) max(16px, var(--sab)) max(16px, var(--sal))",
       }}
     >
       <div
@@ -103,7 +107,7 @@ export default function HelpPanel({
           borderRadius: 10,
           maxWidth: 460,
           width: "100%",
-          maxHeight: "85vh",
+          maxHeight: "85dvh",
           overflowY: "auto",
           padding: "18px 20px 20px",
           font: "13px/1.45 system-ui",
