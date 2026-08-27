@@ -27,7 +27,10 @@ services:
       - "127.0.0.1:6363:6379"
 
   app:
-    build: .
+    build:
+      context: .
+      args:
+        VITE_CARTO_KEY: ${VITE_CARTO_KEY:-}
     restart: unless-stopped
     environment:
       PGHOST: db

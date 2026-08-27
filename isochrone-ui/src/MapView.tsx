@@ -100,6 +100,16 @@ const initialProfile = PROFILES.includes(urlProfile) ? urlProfile : PROFILES[0];
 const urlLat = parseFloat(urlParams.get("lat") ?? "");
 const urlLon = parseFloat(urlParams.get("lon") ?? "");
 
+// CARTO stamps "API KEY REQUIRED" across unkeyed basemap tiles now. The key is
+// public by nature — the browser sends it on every tile request — so it is
+// scoped by domain in the CARTO dashboard, not kept secret; it is injected at
+// build time only to keep it out of git. Unset (local dev) falls back to the
+// unkeyed URL, which still renders, watermarked.
+const CARTO_KEY = import.meta.env.VITE_CARTO_KEY ?? "";
+const carto = (path: string) =>
+  `https://{s}.basemaps.cartocdn.com/${path}` +
+  (CARTO_KEY ? `?api_key=${CARTO_KEY}` : "");
+
 const CARTO_ATTR =
   '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>';
 
@@ -112,7 +122,7 @@ const CARTO_ATTR =
 const BASEMAPS = {
   dark: {
     label: "Dark Matter",
-    url: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+    url: carto("dark_all/{z}/{x}/{y}{r}.png"),
     attribution: CARTO_ATTR,
     veil: "#f2f6fb",
     veilOpacity: 0.1,
@@ -123,7 +133,7 @@ const BASEMAPS = {
   },
   voyager: {
     label: "Voyager",
-    url: "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
+    url: carto("rastertiles/voyager/{z}/{x}/{y}{r}.png"),
     attribution: CARTO_ATTR,
     veil: "#0b1622",
     veilOpacity: 0.24,
