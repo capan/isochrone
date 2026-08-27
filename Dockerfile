@@ -3,6 +3,10 @@ WORKDIR /ui
 COPY isochrone-ui/package*.json ./
 RUN npm ci
 COPY isochrone-ui/ ./
+# Vite inlines VITE_* at build time, so the CARTO key has to be present here
+# rather than in the runtime env — compose passes it through from .env.
+ARG VITE_CARTO_KEY=""
+ENV VITE_CARTO_KEY=$VITE_CARTO_KEY
 RUN npm run build
 
 FROM node:22-slim
