@@ -105,10 +105,15 @@ const urlLon = parseFloat(urlParams.get("lon") ?? "");
 // scoped by domain in the CARTO dashboard, not kept secret; it is injected at
 // build time only to keep it out of git. Unset (local dev) falls back to the
 // unkeyed URL, which still renders, watermarked.
+//
+// The parameter is `key`, NOT `api_key` — cartocdn ignores unknown params and
+// serves the watermarked tile with a 200, so a wrong name looks exactly like
+// no key at all. Measured 2026-08-27 on one voyager tile: keyed 33,181 bytes,
+// unkeyed and `api_key=` and `key=garbage` all byte-identical at 29,528.
 const CARTO_KEY = import.meta.env.VITE_CARTO_KEY ?? "";
 const carto = (path: string) =>
   `https://{s}.basemaps.cartocdn.com/${path}` +
-  (CARTO_KEY ? `?api_key=${CARTO_KEY}` : "");
+  (CARTO_KEY ? `?key=${CARTO_KEY}` : "");
 
 const CARTO_ATTR =
   '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>';
