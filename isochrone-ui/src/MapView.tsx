@@ -586,6 +586,12 @@ export default function MapView() {
   const mobilitySegRef = useRef<HTMLDivElement | null>(null);
   const placeLayerRef = useRef<L.LayerGroup | null>(null);
   const placesGenRef = useRef(0);
+  // Skips a stale /api/rent response before it does any DOM work. Not load
+  // bearing for visibility the way placesGenRef is for loadPlaces: wrap/
+  // rentBox are fresh per effect run and already detached once a newer click
+  // rebuilds them, so a late write would land somewhere invisible anyway —
+  // this just avoids doing that pointless write in the first place.
+  const rentGenRef = useRef(0);
   const drawPlacesRef = useRef<(items: Place[]) => void>(() => {});
   const loadPlacesRef = useRef<(lat: number, lon: number) => void>(() => {});
   // Suggestion markers get their own layer group, same pattern as places: a
@@ -1937,6 +1943,55 @@ export default function MapView() {
       PROFILE_TRIP[profile] ?? profile
     } · ${places.length.toLocaleString()} places within reach`;
     wrap.appendChild(head);
+
+    // Mietspiegel 2026 reference rent (T-042) — a second, independent fetch
+    // for the same point (rentGenRef above explains the guard). A click on
+    // water or outside Berlin 400s here routinely, so failure is silent (no
+    // line appended, no toast) rather than breaking the popup.
+    // Appended into its own box (not straight onto `wrap`) so the lines land
+    // right under the heading once the fetch resolves, instead of wherever
+    // `wrap`'s child list happens to end after the synchronous chips below.
+    const rentBox = document.createElement("div");
+    wrap.appendChild(rentBox);
+    const rentGen = ++rentGenRef.current;
+    fetch(`/api/rent?lat=${lat}&lon=${lon}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!d || rentGen !== rentGenRef.current) return;
+        const rentLine = document.createElement("div");
+        rentLine.className = "click-popup-rent";
+        rentLine.textContent = `Wohnlage: ${d.wohnlage}${
+          d.baualter ? ` · Baujahr: ${d.baualter.decade}` : ""
+        }`;
+        rentBox.appendChild(rentLine);
+        // eurPerSqm is null when the decade told us nothing at all (no block
+        // under the click, or a mixed-era block) — a range spanning every
+        // construction year is indistinguishable from no answer (see the
+        // noInformation comment on the backend route), so this never prints
+        // a numeric range in that case, only the reason.
+        if (d.eurPerSqm) {
+          const priceLine = document.createElement("div");
+          priceLine.className = "click-popup-rent";
+          priceLine.textContent = `Mietspiegel 2026: ${d.eurPerSqm.lower}–${d.eurPerSqm.upper} €/m²`;
+          rentBox.appendChild(priceLine);
+          if (!d.resolved) {
+            const rangeNote = document.createElement("div");
+            rangeNote.className = "muted click-popup-rent";
+            rangeNote.textContent = `Construction year spans ${d.bands.length} Mietspiegel bands — a range, not a single value`;
+            rentBox.appendChild(rangeNote);
+          }
+        } else {
+          const noteLine = document.createElement("div");
+          noteLine.className = "muted click-popup-rent";
+          noteLine.textContent = `No Mietspiegel figure — ${
+            d.reason ?? "construction year unknown here"
+          }`;
+          rentBox.appendChild(noteLine);
+        }
+      })
+      .catch(() => {
+        /* clicking water/outside Berlin is normal; the popup just gets no rent line */
+      });
 
     if (groups.length) {
       const chips = document.createElement("div");

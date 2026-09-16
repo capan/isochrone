@@ -581,6 +581,10 @@ a { color: #2a63b5; }
   padding-right: 18px;
 }
 .click-popup-chips { margin: 0; max-width: 240px; }
+/* T-042: Mietspiegel reference-rent lines, fetched separately from the rest
+   of the popup — kept at meta size so two extra lines don't outweigh the
+   heading they sit under. */
+.click-popup-rent { font-size: var(--fs-meta); color: var(--text-secondary); margin: 4px 0; }
 
 /* "Where should I live" questionnaire (T-016). Sits between the ramp and
    the places section; class names follow the existing places/place-list
