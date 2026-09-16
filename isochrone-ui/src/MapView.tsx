@@ -559,6 +559,12 @@ export default function MapView() {
   // effect still reads the ref, which never goes stale inside its closure
   const [profile, setProfile] = useState(initialProfile);
   const [caps, setCaps] = useState<Record<string, number>>({});
+  // T-042: optional Wohnfläche for the rent lookup only — kept as the raw
+  // input string (not a number) so an in-progress edit like "7" doesn't get
+  // coerced to NaN and bounced. Deliberately not wired into updateIsochrones
+  // or redrawRef: size narrows the Mietspiegel row, it has no bearing on the
+  // isochrone itself, so it must never trigger that request.
+  const [rentSqm, setRentSqm] = useState("");
   const [places, setPlaces] = useState<Place[]>([]);
   const placesRef = useRef<Place[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
@@ -1954,7 +1960,12 @@ export default function MapView() {
     const rentBox = document.createElement("div");
     wrap.appendChild(rentBox);
     const rentGen = ++rentGenRef.current;
-    fetch(`/api/rent?lat=${lat}&lon=${lon}`)
+    // sqmNum is only sent once it's a real, positive number — an in-progress
+    // edit ("", "-", a lone ".") falls back to the unsized query rather than
+    // sending garbage the backend would 400 on.
+    const sqmNum = Number(rentSqm);
+    const sqmParam = rentSqm !== "" && Number.isFinite(sqmNum) && sqmNum > 0 ? `&sqm=${sqmNum}` : "";
+    fetch(`/api/rent?lat=${lat}&lon=${lon}${sqmParam}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (!d || rentGen !== rentGenRef.current) return;
@@ -1972,7 +1983,13 @@ export default function MapView() {
         if (d.eurPerSqm) {
           const priceLine = document.createElement("div");
           priceLine.className = "click-popup-rent";
-          priceLine.textContent = `Mietspiegel 2026: ${d.eurPerSqm.lower}–${d.eurPerSqm.upper} €/m²`;
+          // mean only ever arrives once sqm narrowed the match to exactly one
+          // row (backend: matches.length === 1) — otherwise it's omitted, not
+          // null, and this falls back to the range exactly as before sqm existed.
+          priceLine.textContent =
+            d.eurPerSqm.mean !== undefined
+              ? `Mietspiegel 2026: ${d.eurPerSqm.mean} €/m² typical · range ${d.eurPerSqm.lower}–${d.eurPerSqm.upper}`
+              : `Mietspiegel 2026: ${d.eurPerSqm.lower}–${d.eurPerSqm.upper} €/m²`;
           rentBox.appendChild(priceLine);
           if (!d.resolved) {
             const rangeNote = document.createElement("div");
@@ -2058,7 +2075,11 @@ export default function MapView() {
     popup.openOn(map);
     // profile is in here because the heading names it; without it the popup
     // kept the wording from whichever profile was active when it opened.
-  }, [clickSummary, places, groups, kindFilter, shownMinutes, profile]);
+    // rentSqm is in here so editing the size field re-fetches and refreshes
+    // the rent line on the popup that's already open — same "refresh in
+    // place" path the chip clicks and profile switch already use above; it
+    // never touches updateIsochrones, so the isochrone itself doesn't redraw.
+  }, [clickSummary, places, groups, kindFilter, shownMinutes, profile, rentSqm]);
 
   return (
     <div className="app">
@@ -2127,6 +2148,24 @@ export default function MapView() {
               </button>
             ))}
           </div>
+
+          {/* T-042: Wohnfläche narrows the Mietspiegel row down to a single
+              mean (see the half-open predicate on the backend). Native
+              number input, no new panel — it only affects the rent line on
+              whatever popup is open, never the isochrone. */}
+          <label className="rent-sqm">
+            Wohnfläche (m²)
+            <input
+              type="number"
+              min={1}
+              max={1000}
+              step={1}
+              placeholder=""
+              value={rentSqm}
+              onChange={(e) => setRentSqm(e.target.value)}
+              aria-label="Wohnfläche in m² for the Mietspiegel rent lookup"
+            />
+          </label>
 
           {/* Only once bands are actually drawn — before the first click, or
               after a click that came back empty/offer/error, this legend

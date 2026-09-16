@@ -1834,14 +1834,28 @@ app.get("/api/rent", async (req: any, res: any) => {
     return res.status(400).json({ error: "Invalid lat or lon" });
   }
 
+  // sqm (Wohnfläche) is optional — absent means "behave exactly as before".
+  // 1000m2 is a sanity ceiling on the input, not a Mietspiegel limit (the
+  // table's own top band is open-ended, "ab 110 m²").
+  let sqm: number | null = null;
+  if (req.query.sqm !== undefined) {
+    const parsed = parseFloat(req.query.sqm);
+    if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 1000) {
+      return res.status(400).json({ error: "Invalid sqm" });
+    }
+    sqm = parsed;
+  }
+
   // Static snapshots (Mietspiegel 2026 edition, Umweltatlas 2016) never
   // change under us, so a week-long TTL is safe — there's no staleness risk
   // a shorter TTL would guard against. That safety only holds while the code
   // computing the value is also unchanged, though: a 7-day TTL means a wrong
   // value would outlive a fix by up to a week, so — same as /api/amenities'
-  // `poi3:` — bump this prefix (rent1 -> rent2 here, fixing the 2001-2010
-  // band mapping) whenever DECADE_TO_BANDS or the response shape changes.
-  const key = `rent2:${lat.toFixed(5)},${lon.toFixed(5)}`;
+  // `poi3:` — bump this prefix whenever DECADE_TO_BANDS or the response shape
+  // changes (rent1 -> rent2 fixed the 2001-2010 band mapping; rent2 -> rent3
+  // adds sqm to the key, T-042 — an unsized query must never serve a sized
+  // one's cached answer or vice versa).
+  const key = `rent3:${lat.toFixed(5)},${lon.toFixed(5)}:${sqm ?? "-"}`;
   try {
     const cached = await cacheGet(key);
     if (cached) {
@@ -1881,8 +1895,19 @@ app.get("/api/rent", async (req: any, res: any) => {
     const mappedBands = decade == null ? [] : DECADE_TO_BANDS[decade] ?? [];
     const bands = mappedBands.length ? mappedBands : ALL_BANDS;
 
+    // Size classes are German Mietspiegel "bis unter" buckets: half-open,
+    // inclusive lower / exclusive upper (minSqm <= x < maxSqm). Verified the
+    // 36 wohnlage x band groups have 0 overlapping (minSqm, maxSqm) pairs, so
+    // this predicate matches EXACTLY ONE row per group. Using `x <= maxSqm`
+    // instead double-matches at all nine bucket boundaries (35/40/45/50/60/
+    // 70/80/90/110) and would silently turn a single mean into a two-row
+    // range — that's the whole reason this comment exists.
     const matches = MIETSPIEGEL.rows.filter(
-      (m) => m.wohnlage === row.wol && bands.includes(m.bezugsfertigkeit)
+      (m) =>
+        m.wohnlage === row.wol &&
+        bands.includes(m.bezugsfertigkeit) &&
+        (sqm === null ||
+          ((m.minSqm === null || sqm >= m.minSqm) && (m.maxSqm === null || sqm < m.maxSqm)))
     );
     if (!matches.length) {
       return res.status(400).json({ error: "no Mietspiegel rows matched" });
@@ -1898,15 +1923,17 @@ app.get("/api/rent", async (req: any, res: any) => {
     // that straddles a band edge (2-11 bands) is a different, genuinely
     // useful case — it still narrows the table a lot — and keeps its range.
     const noInformation = bands.length === ALL_BANDS.length;
-    // No `mean` even in the informative case: averaging means across bands
-    // and size buckets would invent a statistic the table doesn't support.
-    // Only the table's own lower and upper bounds are meaningful once
-    // several bands/rows are pooled.
+    // `mean` only appears when sqm narrowed the match down to exactly one
+    // row (see the half-open predicate above) — with 2+ matching rows,
+    // averaging their means would invent a statistic the table doesn't
+    // support, the same reason `lower`/`upper` (min/max across matches) are
+    // the only fields ever shown for a pooled range.
     const eurPerSqm = noInformation
       ? null
       : {
           lower: Math.min(...matches.map((m) => m.lower)),
           upper: Math.max(...matches.map((m) => m.upper)),
+          ...(matches.length === 1 ? { mean: matches[0].mean } : {}),
         };
     // Only two ways bands can end up as ALL_BANDS: no gebaeudealter block at
     // all (decade null), or the block is the one decade value that maps to
@@ -1932,6 +1959,8 @@ app.get("/api/rent", async (req: any, res: any) => {
         : null,
       bands,
       resolved: bands.length === 1,
+      sqm,
+      matchedRows: matches.length,
       eurPerSqm,
       ...(reason ? { reason } : {}),
       unit: MIETSPIEGEL.unit,

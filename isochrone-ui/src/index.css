@@ -270,6 +270,18 @@ a { color: #2a63b5; }
   box-shadow: inset 0 0 0 1px #9dc0ea;
 }
 
+/* T-042: compact Wohnfläche input for the rent lookup, sized like the search
+   box above rather than the full-width seg control — it's one number, not a
+   row of choices. */
+.rent-sqm {
+  display: flex; align-items: center; gap: 6px; margin: 0 0 12px;
+  font-size: var(--fs-meta); color: var(--text-secondary);
+}
+.rent-sqm input {
+  width: 64px; border: 1px solid #dfe3e8; border-radius: 7px;
+  padding: 6px 8px; font: var(--fs-body) system-ui;
+}
+
 .ramp { margin-bottom: 12px; }
 .ramp-bar { display: flex; }
 .ramp-bar i { flex: 1; height: 9px; }
