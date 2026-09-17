@@ -138,6 +138,76 @@ const NOMINATIM_REVERSE_URL =
 // 406 before the query is ever parsed.
 const USER_AGENT = "isochrone/0.1 (+https://iso.huseyincapan.dev)";
 
+// --- Mietspiegel 2026 reference rents (T-042) -------------------------------
+// Immutable 39KB reference table, loaded once at module scope rather than
+// per-request — same idiom as MAPCONFIG above.
+const MIETSPIEGEL_PATH =
+  process.env.MIETSPIEGEL_PATH ?? path.join(__dirname, "./mietspiegel-2026.json");
+type MietspiegelRow = {
+  zeile: number;
+  wohnlage: "einfach" | "mittel" | "gut";
+  bezugsfertigkeit: string;
+  minSqm: number | null;
+  maxSqm: number | null;
+  lower: number;
+  mean: number;
+  upper: number;
+};
+const MIETSPIEGEL: {
+  edition: number;
+  stichtag: string;
+  source: string;
+  unit: string;
+  rows: MietspiegelRow[];
+} = JSON.parse(fs.readFileSync(MIETSPIEGEL_PATH, "utf8"));
+
+// Maps a berlin_gebaeudealter decade to the Mietspiegel bezugsfertigkeit
+// band(s) it can fall into. Most decades sit cleanly inside one band; the
+// multi-entry cases are decades whose ten-year bucket straddles a band edge
+// (e.g. "1911-1920" spans both "bis 1918" and "1919 bis 1949") — there is no
+// way to pick one without the exact build year, which the dataset doesn't
+// carry, so both are returned and the caller reports the range as unresolved.
+// "gemischte Baualtersklasse" maps to [] because a mixed-era block cannot be
+// resolved to any band at all.
+//
+// The 1971-1980 and 1981-1990 rows also straddle an East/West split
+// ("1973 bis 1985 West" vs "1973 bis 1990 Ost") that we deliberately do not
+// attempt to resolve: the 2001 Bezirk merger put Mitte (East), Tiergarten
+// (West) and Wedding (West) into one Bezirk, so `bezname` is not a usable
+// proxy for East/West and guessing from it would silently print a wrong
+// number. Never infer it from bezname.
+const DECADE_TO_BANDS: Record<string, string[]> = {
+  "bis 1900": ["bis 1918"],
+  "1901-1910": ["bis 1918"],
+  "1911-1920": ["bis 1918", "1919 bis 1949"],
+  "1921-1930": ["1919 bis 1949"],
+  "1931-1940": ["1919 bis 1949"],
+  "1941-1950": ["1919 bis 1949", "1950 bis 1964"],
+  "1951-1960": ["1950 bis 1964"],
+  "1961-1970": ["1950 bis 1964", "1965 bis 1972"],
+  "1971-1980": ["1965 bis 1972", "1973 bis 1985 West", "1973 bis 1990 Ost"],
+  "1981-1990": ["1973 bis 1985 West", "1986 bis 1990 West", "1973 bis 1990 Ost"],
+  "1991-2000": ["1991 bis 2001"],
+  // 2001-2010 covers year 2010 inclusive, which falls in "2010 bis 2015"
+  // (2002 bis 2009 ends at 2009) — this row was originally missing that
+  // third band, understating the upper bound for the 751/13,091 blocks in
+  // this bucket by ~13%. Confirmed against lat=52.5220145&lon=13.3789266.
+  "2001-2010": ["1991 bis 2001", "2002 bis 2009", "2010 bis 2015"],
+  "2011-2015": ["2010 bis 2015"],
+  "gemischte Baualtersklasse": [],
+};
+// All 12 distinct bezugsfertigkeit values in the table — used when the decade
+// is null (no building block under the click) or unresolved ([] above), so
+// the band filter degrades to "every construction era" instead of throwing.
+//
+// "2016 bis 2019" and "2020 bis 2024" never appear as a value anywhere above:
+// no decade key can reach them. That's a dataset-vintage ceiling, not a
+// missing mapping — berlin_gebaeudealter is Umweltatlas 2016, whose newest
+// bucket is "2011-2015", so nothing built after 2015 has a decade key to map
+// from at all. Those two bands can only ever be returned via ALL_BANDS
+// (noInformation below), never as a resolved or narrowed answer.
+const ALL_BANDS = [...new Set(MIETSPIEGEL.rows.map((r) => r.bezugsfertigkeit))];
+
 // The UI offers a 5×5km box, so this has to sit above 25. Remember the buffer
 // roughly triples it: 25km² requested imports ~85km².
 const MAX_AREA_KM2 = parseFloat(process.env.MAX_AREA_KM2 ?? "30");
@@ -1744,6 +1814,164 @@ app.get("/api/amenities", async (req: any, res: any) => {
     res.json(body);
   } catch (err) {
     console.error("❌ amenities error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/rent — Berlin Mietspiegel 2026 reference rent for a click point.
+// One round trip: nearest-address Wohnlage (berlin_wohnlagen) joined against
+// the containing residential block's construction decade
+// (berlin_gebaeudealter), then filtered into the Mietspiegel table. Measured
+// 118ms cold. For a realistic click (an address jittered up to 40m), 91.4%
+// land inside a gebaeudealter block and 54.2% resolve to exactly one band —
+// so `decade` is null (~1 click in 11) or 'gemischte Baualtersklasse' (~7%)
+// often enough that both cases get a real "we don't know" answer below
+// instead of a number, see the noInformation comment further down.
+app.get("/api/rent", async (req: any, res: any) => {
+  const lat = parseFloat(req.query.lat);
+  const lon = parseFloat(req.query.lon);
+  if (isNaN(lat) || isNaN(lon)) {
+    return res.status(400).json({ error: "Invalid lat or lon" });
+  }
+
+  // sqm (Wohnfläche) is optional — absent means "behave exactly as before".
+  // 1000m2 is a sanity ceiling on the input, not a Mietspiegel limit (the
+  // table's own top band is open-ended, "ab 110 m²").
+  let sqm: number | null = null;
+  if (req.query.sqm !== undefined) {
+    const parsed = parseFloat(req.query.sqm);
+    if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 1000) {
+      return res.status(400).json({ error: "Invalid sqm" });
+    }
+    sqm = parsed;
+  }
+
+  // Static snapshots (Mietspiegel 2026 edition, Umweltatlas 2016) never
+  // change under us, so a week-long TTL is safe — there's no staleness risk
+  // a shorter TTL would guard against. That safety only holds while the code
+  // computing the value is also unchanged, though: a 7-day TTL means a wrong
+  // value would outlive a fix by up to a week, so — same as /api/amenities'
+  // `poi3:` — bump this prefix whenever DECADE_TO_BANDS or the response shape
+  // changes (rent1 -> rent2 fixed the 2001-2010 band mapping; rent2 -> rent3
+  // adds sqm to the key, T-042 — an unsized query must never serve a sized
+  // one's cached answer or vice versa).
+  const key = `rent3:${lat.toFixed(5)},${lon.toFixed(5)}:${sqm ?? "-"}`;
+  try {
+    const cached = await cacheGet(key);
+    if (cached) {
+      cacheHits++;
+      return res.json(JSON.parse(cached));
+    }
+    cacheMisses++;
+
+    const r = await pool.query(
+      `WITH p AS (SELECT ST_SetSRID(ST_MakePoint($1,$2),4326) AS g)
+       SELECT w.strasse, w.hnr, w.plz, w.bezname, w.wol,
+              ST_Distance(w.geom::geography,(SELECT g FROM p)::geography) AS addr_m,
+              b.ueberw_dekade_woh_neu AS decade, b.schluessel AS block, b.typklar
+       FROM (SELECT * FROM public.berlin_wohnlagen ORDER BY geom <-> (SELECT g FROM p) LIMIT 1) w
+       -- berlin_gebaeudealter has 3 pairs of genuinely overlapping polygons
+       -- in the source data (not a schema guarantee we control), so a plain
+       -- join could return 2 rows for one point; ORDER BY + LIMIT 1 picks
+       -- one deterministically instead of leaving it to unspecified row order.
+       LEFT JOIN (SELECT * FROM public.berlin_gebaeudealter
+                   WHERE ST_Contains(geom,(SELECT g FROM p))
+                   ORDER BY schluessel LIMIT 1) b ON true`,
+      [lon, lat]
+    );
+
+    const row = r.rows[0];
+    // A nearest-address lookup always returns *something*, so without a
+    // distance cap a click on Munich would silently report a Berlin
+    // Wohnlage. 150m is what separates a click on a building from a click
+    // on water, a park, or another city entirely.
+    if (!row || row.addr_m > 150) {
+      return res
+        .status(400)
+        .json({ error: "outside Berlin", detail: "Mietspiegel data covers Berlin addresses only" });
+    }
+
+    const decade: string | null = row.decade;
+    const mappedBands = decade == null ? [] : DECADE_TO_BANDS[decade] ?? [];
+    const bands = mappedBands.length ? mappedBands : ALL_BANDS;
+
+    // Size classes are German Mietspiegel "bis unter" buckets: half-open,
+    // inclusive lower / exclusive upper (minSqm <= x < maxSqm). Verified the
+    // 36 wohnlage x band groups have 0 overlapping (minSqm, maxSqm) pairs, so
+    // this predicate matches EXACTLY ONE row per group. Using `x <= maxSqm`
+    // instead double-matches at all nine bucket boundaries (35/40/45/50/60/
+    // 70/80/90/110) and would silently turn a single mean into a two-row
+    // range — that's the whole reason this comment exists.
+    const matches = MIETSPIEGEL.rows.filter(
+      (m) =>
+        m.wohnlage === row.wol &&
+        bands.includes(m.bezugsfertigkeit) &&
+        (sqm === null ||
+          ((m.minSqm === null || sqm >= m.minSqm) && (m.maxSqm === null || sqm < m.maxSqm)))
+    );
+    if (!matches.length) {
+      return res.status(400).json({ error: "no Mietspiegel rows matched" });
+    }
+
+    // bands === ALL_BANDS means the decade told us nothing (no block under
+    // the click, or 'gemischte Baualtersklasse'): a range spanning every
+    // construction year is indistinguishable from no answer at all, since
+    // Wohnlage alone only narrows the rent by 0.15 EUR/m2 (measured) — the
+    // other 12 bands do the rest of the work, and none of them applied here.
+    // Printing the full-table min/max as if it were computed would be worse
+    // than admitting we don't know, so this returns null instead. A decade
+    // that straddles a band edge (2-11 bands) is a different, genuinely
+    // useful case — it still narrows the table a lot — and keeps its range.
+    const noInformation = bands.length === ALL_BANDS.length;
+    // `mean` only appears when sqm narrowed the match down to exactly one
+    // row (see the half-open predicate above) — with 2+ matching rows,
+    // averaging their means would invent a statistic the table doesn't
+    // support, the same reason `lower`/`upper` (min/max across matches) are
+    // the only fields ever shown for a pooled range.
+    const eurPerSqm = noInformation
+      ? null
+      : {
+          lower: Math.min(...matches.map((m) => m.lower)),
+          upper: Math.max(...matches.map((m) => m.upper)),
+          ...(matches.length === 1 ? { mean: matches[0].mean } : {}),
+        };
+    // Only two ways bands can end up as ALL_BANDS: no gebaeudealter block at
+    // all (decade null), or the block is the one decade value that maps to
+    // no band ('gemischte Baualtersklasse') — DECADE_TO_BANDS has an entry
+    // for every other decade Umweltatlas produces, so this is exhaustive.
+    const reason = noInformation
+      ? decade == null
+        ? "no residential block at this point"
+        : "mixed construction ages in this block"
+      : undefined;
+
+    const body = {
+      address: {
+        strasse: row.strasse,
+        hnr: row.hnr,
+        plz: row.plz,
+        bezirk: row.bezname,
+        distanceM: Math.round(row.addr_m),
+      },
+      wohnlage: row.wol,
+      baualter: row.decade
+        ? { decade: row.decade, block: row.block, typ: row.typklar }
+        : null,
+      bands,
+      resolved: bands.length === 1,
+      sqm,
+      matchedRows: matches.length,
+      eurPerSqm,
+      ...(reason ? { reason } : {}),
+      unit: MIETSPIEGEL.unit,
+      edition: MIETSPIEGEL.edition,
+      stichtag: MIETSPIEGEL.stichtag,
+      source: MIETSPIEGEL.source,
+    };
+    await cacheSet(key, JSON.stringify(body), 60 * 60 * 24 * 7);
+    res.json(body);
+  } catch (err) {
+    console.error("❌ rent error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
