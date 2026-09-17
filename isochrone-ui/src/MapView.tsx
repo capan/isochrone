@@ -2009,6 +2009,14 @@ export default function MapView() {
 
     const wrap = document.createElement("div");
     wrap.className = "click-popup";
+    // Leaflet routes a click anywhere over the map container to map.on("click"),
+    // and a popup sits inside that container — so tapping a group chip also read
+    // as a fresh map click at the chip's own pixel, throwing away the point you
+    // actually picked and refetching isochrone + amenities + rent for wherever
+    // the chip happened to sit. Measured: clicking "food" on a popup opened at
+    // 52.5380,13.4180 refetched all three at 52.540,13.416. Same guard the
+    // layer and help controls above already use.
+    L.DomEvent.disableClickPropagation(wrap);
 
     const head = document.createElement("div");
     head.className = "click-popup-head";
