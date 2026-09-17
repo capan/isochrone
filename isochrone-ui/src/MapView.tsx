@@ -186,6 +186,17 @@ type Place = {
   minutes: number;
 };
 
+// Mirrors the /api/rent response body (isochrone-backend/index.ts) — only
+// the fields the popup actually reads.
+type RentInfo = {
+  wohnlage: string;
+  baualter: { decade: string } | null;
+  bands: unknown[];
+  resolved: boolean;
+  eurPerSqm: { lower: number; upper: number; mean?: number } | null;
+  reason?: string;
+};
+
 // Half-width of the box offered when someone clicks outside coverage: 2.5km
 // each way = a 5×5km area. The server buffers this by another 2.1km on every
 // side, so it actually imports ~85km² — keep MAX_AREA_KM2 above 25.
@@ -264,6 +275,20 @@ const LAYER_LABEL: Record<ReachLayer, string> = {
   playground: "playground",
   greenspace: "green space",
   dining: "dining",
+};
+
+// T-042: the Mietspiegel API returns German source vocabulary verbatim
+// (einfach/mittel/gut, "bis 1900", ...) because other consumers depend on
+// those exact strings — translation happens here, at render time, not in the
+// response. Pass-through fallback (`?? raw`) matters: if the WFS ever adds a
+// decade bucket this file doesn't know about, it renders as the raw German
+// string instead of "undefined". "Mietspiegel" itself stays untranslated —
+// it's the proper name of the statutory Berlin rent index, no English
+// equivalent exists.
+const WOL_LABEL: Record<string, string> = { einfach: "basic", mittel: "average", gut: "good" };
+const DECADE_LABEL: Record<string, string> = {
+  "bis 1900": "before 1900",
+  "gemischte Baualtersklasse": "mixed ages",
 };
 
 type SuggestCell = {
@@ -565,6 +590,13 @@ export default function MapView() {
   // or redrawRef: size narrows the Mietspiegel row, it has no bearing on the
   // isochrone itself, so it must never trigger that request.
   const [rentSqm, setRentSqm] = useState("");
+  // T-042 round 2: the Mietspiegel result for whatever point/size is
+  // currently asked about. Populated by its own effect (below, keyed only on
+  // clickSummary + rentSqm) — the popup-building effect only reads this, it
+  // never fetches, which is the fix for the double/triple /api/rent request
+  // T-042 round 1 shipped (kindFilter, places, groups arriving all used to
+  // drag a rent fetch along for the ride via that effect's dependency array).
+  const [rentInfo, setRentInfo] = useState<RentInfo | null>(null);
   const [places, setPlaces] = useState<Place[]>([]);
   const placesRef = useRef<Place[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
@@ -592,11 +624,11 @@ export default function MapView() {
   const mobilitySegRef = useRef<HTMLDivElement | null>(null);
   const placeLayerRef = useRef<L.LayerGroup | null>(null);
   const placesGenRef = useRef(0);
-  // Skips a stale /api/rent response before it does any DOM work. Not load
-  // bearing for visibility the way placesGenRef is for loadPlaces: wrap/
-  // rentBox are fresh per effect run and already detached once a newer click
-  // rebuilds them, so a late write would land somewhere invisible anyway —
-  // this just avoids doing that pointless write in the first place.
+  // Skips a stale /api/rent response before it writes rentInfo. This IS load
+  // bearing now (T-042 round 2): the result lands in shared React state, not
+  // a per-run DOM node that's orphaned once a newer click rebuilds the popup,
+  // so without this guard a slow response for an earlier click could land
+  // after a faster response for a later one and overwrite it with stale data.
   const rentGenRef = useRef(0);
   const drawPlacesRef = useRef<(items: Place[]) => void>(() => {});
   const loadPlacesRef = useRef<(lat: number, lon: number) => void>(() => {});
@@ -1915,6 +1947,41 @@ export default function MapView() {
     .filter(Boolean)
     .join(" · ");
 
+  // T-042 round 2: Mietspiegel 2026 reference rent for the clicked point,
+  // fetched here and only here — deliberately its own effect, separate from
+  // the popup-building one below. That effect used to own this fetch and
+  // listed clickSummary/places/groups/kindFilter/profile/rentSqm as deps, so
+  // a place-group pill click or amenities arriving (neither of which touches
+  // rent) dragged a redundant /api/rent along for the ride: one map click
+  // fired it twice (clickSummary landing, then again once places arrived),
+  // a pill click fired a third identical request. This effect's dependency
+  // array is only the click coordinates and rentSqm — the only two things
+  // rent actually depends on — so it fires exactly once per distinct
+  // (lat, lon, sqm), never on an unrelated rerender.
+  useEffect(() => {
+    if (!clickSummary) {
+      setRentInfo(null);
+      return;
+    }
+    const { lat, lon } = clickSummary;
+    const rentGen = ++rentGenRef.current;
+    setRentInfo(null); // clear the previous point's answer while the new one loads
+    // sqmNum is only sent once it's a real, positive number — an in-progress
+    // edit ("", "-", a lone ".") falls back to the unsized query rather than
+    // sending garbage the backend would 400 on.
+    const sqmNum = Number(rentSqm);
+    const sqmParam = rentSqm !== "" && Number.isFinite(sqmNum) && sqmNum > 0 ? `&sqm=${sqmNum}` : "";
+    fetch(`/api/rent?lat=${lat}&lon=${lon}${sqmParam}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!d || rentGen !== rentGenRef.current) return; // a newer click/edit already won
+        setRentInfo(d);
+      })
+      .catch(() => {
+        /* clicking water/outside Berlin is normal; the popup just gets no rent line */
+      });
+  }, [clickSummary, rentSqm]);
+
   // T-031: the click result moved off the sidebar and onto the map as a
   // popup — a compact summary (walk time, total reachable, the seven group
   // chips), not the full list, which still lives in the left panel. Rebuilt
@@ -1950,65 +2017,56 @@ export default function MapView() {
     } · ${places.length.toLocaleString()} places within reach`;
     wrap.appendChild(head);
 
-    // Mietspiegel 2026 reference rent (T-042) — a second, independent fetch
-    // for the same point (rentGenRef above explains the guard). A click on
-    // water or outside Berlin 400s here routinely, so failure is silent (no
-    // line appended, no toast) rather than breaking the popup.
-    // Appended into its own box (not straight onto `wrap`) so the lines land
-    // right under the heading once the fetch resolves, instead of wherever
-    // `wrap`'s child list happens to end after the synchronous chips below.
-    const rentBox = document.createElement("div");
-    wrap.appendChild(rentBox);
-    const rentGen = ++rentGenRef.current;
-    // sqmNum is only sent once it's a real, positive number — an in-progress
-    // edit ("", "-", a lone ".") falls back to the unsized query rather than
-    // sending garbage the backend would 400 on.
-    const sqmNum = Number(rentSqm);
-    const sqmParam = rentSqm !== "" && Number.isFinite(sqmNum) && sqmNum > 0 ? `&sqm=${sqmNum}` : "";
-    fetch(`/api/rent?lat=${lat}&lon=${lon}${sqmParam}`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        if (!d || rentGen !== rentGenRef.current) return;
-        const rentLine = document.createElement("div");
-        rentLine.className = "click-popup-rent";
-        rentLine.textContent = `Wohnlage: ${d.wohnlage}${
-          d.baualter ? ` · Baujahr: ${d.baualter.decade}` : ""
-        }`;
-        rentBox.appendChild(rentLine);
-        // eurPerSqm is null when the decade told us nothing at all (no block
-        // under the click, or a mixed-era block) — a range spanning every
-        // construction year is indistinguishable from no answer (see the
-        // noInformation comment on the backend route), so this never prints
-        // a numeric range in that case, only the reason.
-        if (d.eurPerSqm) {
-          const priceLine = document.createElement("div");
-          priceLine.className = "click-popup-rent";
-          // mean only ever arrives once sqm narrowed the match to exactly one
-          // row (backend: matches.length === 1) — otherwise it's omitted, not
-          // null, and this falls back to the range exactly as before sqm existed.
-          priceLine.textContent =
-            d.eurPerSqm.mean !== undefined
-              ? `Mietspiegel 2026: ${d.eurPerSqm.mean} €/m² typical · range ${d.eurPerSqm.lower}–${d.eurPerSqm.upper}`
-              : `Mietspiegel 2026: ${d.eurPerSqm.lower}–${d.eurPerSqm.upper} €/m²`;
-          rentBox.appendChild(priceLine);
-          if (!d.resolved) {
-            const rangeNote = document.createElement("div");
-            rangeNote.className = "muted click-popup-rent";
-            rangeNote.textContent = `Construction year spans ${d.bands.length} Mietspiegel bands — a range, not a single value`;
-            rentBox.appendChild(rangeNote);
-          }
-        } else {
-          const noteLine = document.createElement("div");
-          noteLine.className = "muted click-popup-rent";
-          noteLine.textContent = `No Mietspiegel figure — ${
-            d.reason ?? "construction year unknown here"
-          }`;
-          rentBox.appendChild(noteLine);
+    // Mietspiegel 2026 reference rent (T-042) — rendered from rentInfo, which
+    // its own effect above keeps fresh for the current (clickSummary,
+    // rentSqm) pair. This effect only reads it, it never fetches: that split
+    // is what stops an unrelated rerender (a pill click, places arriving)
+    // from firing a redundant /api/rent (see the effect above for the
+    // measured duplicate-request history). A click on water or outside
+    // Berlin 400s here routinely, so no rentInfo just means no rent line —
+    // no toast, nothing broken.
+    if (rentInfo) {
+      const rentBox = document.createElement("div");
+      wrap.appendChild(rentBox);
+      const rentLine = document.createElement("div");
+      rentLine.className = "click-popup-rent";
+      rentLine.textContent = `Location: ${WOL_LABEL[rentInfo.wohnlage] ?? rentInfo.wohnlage}${
+        rentInfo.baualter
+          ? ` · Built: ${DECADE_LABEL[rentInfo.baualter.decade] ?? rentInfo.baualter.decade}`
+          : ""
+      }`;
+      rentBox.appendChild(rentLine);
+      // eurPerSqm is null when the decade told us nothing at all (no block
+      // under the click, or a mixed-era block) — a range spanning every
+      // construction year is indistinguishable from no answer (see the
+      // noInformation comment on the backend route), so this never prints
+      // a numeric range in that case, only the reason.
+      if (rentInfo.eurPerSqm) {
+        const priceLine = document.createElement("div");
+        priceLine.className = "click-popup-rent";
+        // mean only ever arrives once sqm narrowed the match to exactly one
+        // row (backend: matches.length === 1) — otherwise it's omitted, not
+        // null, and this falls back to the range exactly as before sqm existed.
+        priceLine.textContent =
+          rentInfo.eurPerSqm.mean !== undefined
+            ? `Mietspiegel 2026: ${rentInfo.eurPerSqm.mean} €/m² typical · range ${rentInfo.eurPerSqm.lower}–${rentInfo.eurPerSqm.upper}`
+            : `Mietspiegel 2026: ${rentInfo.eurPerSqm.lower}–${rentInfo.eurPerSqm.upper} €/m²`;
+        rentBox.appendChild(priceLine);
+        if (!rentInfo.resolved) {
+          const rangeNote = document.createElement("div");
+          rangeNote.className = "muted click-popup-rent";
+          rangeNote.textContent = `Construction year spans ${rentInfo.bands.length} Mietspiegel bands — a range, not a single value`;
+          rentBox.appendChild(rangeNote);
         }
-      })
-      .catch(() => {
-        /* clicking water/outside Berlin is normal; the popup just gets no rent line */
-      });
+      } else {
+        const noteLine = document.createElement("div");
+        noteLine.className = "muted click-popup-rent";
+        noteLine.textContent = `No Mietspiegel figure — ${
+          rentInfo.reason ?? "construction year unknown here"
+        }`;
+        rentBox.appendChild(noteLine);
+      }
+    }
 
     if (groups.length) {
       const chips = document.createElement("div");
@@ -2075,11 +2133,13 @@ export default function MapView() {
     popup.openOn(map);
     // profile is in here because the heading names it; without it the popup
     // kept the wording from whichever profile was active when it opened.
-    // rentSqm is in here so editing the size field re-fetches and refreshes
-    // the rent line on the popup that's already open — same "refresh in
-    // place" path the chip clicks and profile switch already use above; it
-    // never touches updateIsochrones, so the isochrone itself doesn't redraw.
-  }, [clickSummary, places, groups, kindFilter, shownMinutes, profile, rentSqm]);
+    // rentInfo is in here so the rent-fetch effect landing a result (a new
+    // click, or an edit to the size field) refreshes the popup that's already
+    // open — same "refresh in place" path the chip clicks and profile switch
+    // already use above. rentSqm itself is deliberately NOT a dependency:
+    // this effect only renders rentInfo, it doesn't fetch, so it has nothing
+    // to do when rentSqm changes except wait for rentInfo to follow.
+  }, [clickSummary, places, groups, kindFilter, shownMinutes, profile, rentInfo]);
 
   return (
     <div className="app">
@@ -2154,7 +2214,7 @@ export default function MapView() {
               number input, no new panel — it only affects the rent line on
               whatever popup is open, never the isochrone. */}
           <label className="rent-sqm">
-            Wohnfläche (m²)
+            Flat size (m²)
             <input
               type="number"
               min={1}
@@ -2163,7 +2223,7 @@ export default function MapView() {
               placeholder=""
               value={rentSqm}
               onChange={(e) => setRentSqm(e.target.value)}
-              aria-label="Wohnfläche in m² for the Mietspiegel rent lookup"
+              aria-label="Flat size in m² for the Mietspiegel rent lookup"
             />
           </label>
 
