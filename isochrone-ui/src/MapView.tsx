@@ -194,6 +194,11 @@ type RentInfo = {
   bands: unknown[];
   resolved: boolean;
   eurPerSqm: { lower: number; upper: number; mean?: number } | null;
+  // T-042 round 3: echoes the sqm the backend actually matched on, so the
+  // popup can print "45 m²" and a monthly figure without a second fetch —
+  // rentSqm (the input's live string state) isn't safe to read here, it can
+  // already be mid-edit for the *next* click by the time this response lands.
+  sqm: number | null;
   reason?: string;
 };
 
@@ -2050,16 +2055,32 @@ export default function MapView() {
       // noInformation comment on the backend route), so this never prints
       // a numeric range in that case, only the reason.
       if (rentInfo.eurPerSqm) {
-        const priceLine = document.createElement("div");
-        priceLine.className = "click-popup-rent";
+        const { lower, upper, mean } = rentInfo.eurPerSqm;
+        const sqm = rentInfo.sqm;
         // mean only ever arrives once sqm narrowed the match to exactly one
         // row (backend: matches.length === 1) — otherwise it's omitted, not
         // null, and this falls back to the range exactly as before sqm existed.
-        priceLine.textContent =
-          rentInfo.eurPerSqm.mean !== undefined
-            ? `Mietspiegel 2026: ${rentInfo.eurPerSqm.mean} €/m² typical · range ${rentInfo.eurPerSqm.lower}–${rentInfo.eurPerSqm.upper}`
-            : `Mietspiegel 2026: ${rentInfo.eurPerSqm.lower}–${rentInfo.eurPerSqm.upper} €/m²`;
+        // Guarding on sqm !== null too (not just mean) keeps the monthly
+        // multiplication out of TS's hands unless a real size backs it.
+        const priceLine = document.createElement("div");
+        priceLine.className = "click-popup-rent";
+        const sourceNote = document.createElement("div");
+        sourceNote.className = "muted click-popup-rent";
+        // Always two decimals: the Mietspiegel carries values like 6.7 and
+        // 13.32, and interpolating them raw printed "range 6.7–13.32", which
+        // reads as a typo next to a cent-precise neighbour rather than as a
+        // price. These are money, so they get money formatting.
+        const eur = (n: number) => n.toFixed(2);
+        if (mean !== undefined && sqm !== null) {
+          const monthly = Math.round(mean * sqm);
+          priceLine.textContent = `Reference rent, ${sqm} m²: ${eur(mean)} €/m² · ≈ €${monthly.toLocaleString()}/month`;
+          sourceNote.textContent = `Mietspiegel 2026 · net cold, before heating and bills · range ${eur(lower)}–${eur(upper)}`;
+        } else {
+          priceLine.textContent = `Reference rent: ${eur(lower)}–${eur(upper)} €/m²`;
+          sourceNote.textContent = `Mietspiegel 2026 · enter a flat size for a single figure`;
+        }
         rentBox.appendChild(priceLine);
+        rentBox.appendChild(sourceNote);
         if (!rentInfo.resolved) {
           const rangeNote = document.createElement("div");
           rangeNote.className = "muted click-popup-rent";
@@ -2233,6 +2254,7 @@ export default function MapView() {
               onChange={(e) => setRentSqm(e.target.value)}
               aria-label="Flat size in m² for the Mietspiegel rent lookup"
             />
+            <span className="muted">Sharpens the rent estimate when you click the map</span>
           </label>
 
           {/* Only once bands are actually drawn — before the first click, or

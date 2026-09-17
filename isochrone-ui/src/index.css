@@ -274,13 +274,17 @@ a { color: #2a63b5; }
    box above rather than the full-width seg control — it's one number, not a
    row of choices. */
 .rent-sqm {
-  display: flex; align-items: center; gap: 6px; margin: 0 0 12px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 12px;
   font-size: var(--fs-meta); color: var(--text-secondary);
 }
 .rent-sqm input {
   width: 64px; border: 1px solid #dfe3e8; border-radius: 7px;
   padding: 6px 8px; font: var(--fs-body) system-ui;
 }
+/* T-042 round 3: the hint explaining what the field is for. flex-basis:100%
+   drops it onto its own line under the label+input row without a new class
+   — .rent-sqm is already flex, this just makes one child span the row. */
+.rent-sqm .muted { flex-basis: 100%; margin: 2px 0 0; }
 
 .ramp { margin-bottom: 12px; }
 .ramp-bar { display: flex; }
